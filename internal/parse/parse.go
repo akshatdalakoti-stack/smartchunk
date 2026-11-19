@@ -380,3 +380,78 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
+
+// lineIndex maps byte offsets to 1-based line numbers and back.
+type lineIndex struct {
+	src    []byte
+	starts []int // starts[i] is the offset of line i+1
+}
+
+func newLineIndex(src []byte) *lineIndex {
+	li := &lineIndex{src: src, starts: []int{0}}
+	for i, c := range src {
+		if c == '\n' && i+1 < len(src) {
+			li.starts = append(li.starts, i+1)
+		}
+	}
+	return li
+}
+
+func (li *lineIndex) count() int { return len(li.starts) }
+
+// lineOf returns the 1-based line containing the byte offset.
+func (li *lineIndex) lineOf(off int) int {
+	if off < 0 {
+		off = 0
+	}
+	// First line whose start is beyond off, minus one.
+	i := sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > off })
+	if i == 0 {
+		return 1
+	}
+	return i
+}
+
+// line returns the text of a 1-based line without its newline, or "" when
+// the line does not exist.
+func (li *lineIndex) line(n int) string {
+	if n < 1 || n > len(li.starts) {
+		return ""
+	}
+	start := li.starts[n-1]
+	end := len(li.src)
+	if n < len(li.starts) {
+		end = li.starts[n] - 1
+	}
+	return strings.TrimSuffix(string(li.src[start:end]), "\n")
+}
+
+func (li *lineIndex) isBlank(n int) bool {
+	return strings.TrimSpace(li.line(n)) == ""
+}
+
+// skipBlank returns the first non-blank line at or after n.
+func (li *lineIndex) skipBlank(n int) int {
+	for n <= len(li.starts) && li.isBlank(n) {
+		n++
+	}
+	return n
+}
+
+// text returns lines start..end joined with "\n".
+func (li *lineIndex) text(start, end int) string {
+	if start < 1 {
+		start = 1
+	}
+	if end > len(li.starts) {
+		end = len(li.starts)
+	}
+	if end < start {
+		return ""
+	}
+	lines := make([]string, 0, end-start+1)
+	for n := start; n <= end; n++ {
+		lines = append(lines, li.line(n))
+	}
+	return strings.Join(lines, "\n")
+}
