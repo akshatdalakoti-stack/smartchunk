@@ -187,3 +187,42 @@ func classify(n ast.Node) (BlockType, bool) {
 		return Paragraph, true
 	}
 }
+
+// normalize converts CRLF/CR line endings to LF and blanks out YAML front
+// matter. Both operations keep the number of lines unchanged.
+func normalize(source []byte) []byte {
+	src := bytes.ReplaceAll(source, []byte("\r\n"), []byte("\n"))
+	src = bytes.ReplaceAll(src, []byte("\r"), []byte("\n"))
+	src = bytes.TrimPrefix(src, []byte("\xef\xbb\xbf"))
+	return blankFrontMatter(src)
+}
+
+// blankFrontMatter replaces a leading "---" ... "---" YAML block with empty
+// lines. Left in place, goldmark reads "title: x\n---" as a setext heading.
+func blankFrontMatter(src []byte) []byte {
+	if !bytes.HasPrefix(src, []byte("---\n")) {
+		return src
+	}
+	lines := bytes.Split(src, []byte("\n"))
+	closing := -1
+	for i := 1; i < len(lines); i++ {
+		l := string(bytes.TrimRight(lines[i], " \t"))
+		if l == "---" || l == "..." {
+			closing = i
+			break
+		}
+	}
+	if closing < 0 {
+		return src
+	}
+	out := make([]byte, 0, len(src))
+	for i, l := range lines {
+		if i > closing {
+			out = append(out, l...)
+		}
+		if i < len(lines)-1 {
+			out = append(out, '\n')
+		}
+	}
+	return out
+}
