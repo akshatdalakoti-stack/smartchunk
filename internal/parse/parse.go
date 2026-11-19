@@ -226,3 +226,157 @@ func blankFrontMatter(src []byte) []byte {
 	}
 	return out
 }
+
+// startOffset returns the offset where a top-level node begins, or -1 when
+// goldmark recorded none. A table is the exception to trusting Pos: when a
+// table directly follows paragraph text, goldmark carves it out of that
+// paragraph and leaves the table's Pos at the paragraph's first line. Its
+// real start is its header row.
+func startOffset(n ast.Node) int {
+	if n.Kind() != extast.KindTable {
+		return n.Pos()
+	}
+	start := -1
+	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering || c == n {
+			return ast.WalkContinue, nil
+		}
+		note := func(p int) {
+			if p >= 0 && (start < 0 || p < start) {
+				start = p
+			}
+		}
+		note(c.Pos())
+		if t, ok := c.(*ast.Text); ok {
+			note(t.Segment.Start)
+		}
+		return ast.WalkContinue, nil
+	})
+	if start < 0 {
+		return n.Pos()
+	}
+	return start
+}
+
+// maxOffset returns the offset of the last source byte that belongs to n or
+// any of its descendants.
+func maxOffset(n ast.Node, src []byte) int {
+	end := 0
+	if p := n.Pos(); p > end {
+		end = p
+	}
+	note := func(stop int) {
+		// Segment stops are exclusive and usually sit just past a newline.
+		if stop-1 > end {
+			end = stop - 1
+		}
+	}
+	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if p := c.Pos(); p > end {
+			end = p
+		}
+		switch v := c.(type) {
+		case *ast.Text:
+			note(v.Segment.Stop)
+		case *ast.RawHTML:
+			if v.Segments != nil {
+				for i := 0; i < v.Segments.Len(); i++ {
+					note(v.Segments.At(i).Stop)
+				}
+			}
+		case *ast.FencedCodeBlock:
+			if v.Info != nil {
+				note(v.Info.Segment.Stop)
+			}
+		case *ast.HTMLBlock:
+			if v.HasClosure() {
+				note(v.ClosureLine.Stop)
+			}
+		}
+		if c.Type() == ast.TypeBlock {
+			if lines := c.Lines(); lines != nil {
+				for i := 0; i < lines.Len(); i++ {
+					note(lines.At(i).Stop)
+				}
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	if end >= len(src) {
+		end = len(src) - 1
+	}
+	if end < 0 {
+		end = 0
+	}
+	return end
+}
+
+// extendForClosers widens end to cover syntax that closes a block but that
+// goldmark does not attribute to any node: the closing fence of a code block,
+// the underline of a setext heading and a table's delimiter row.
+func extendForClosers(n ast.Node, src []byte, li *lineIndex, end int) int {
+	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if _, ok := c.(*ast.FencedCodeBlock); ok {
+			last := li.lineOf(maxOffset(c, src))
+			if isFenceLine(li.line(last + 1)) {
+				if last+1 > end {
+					end = last + 1
+				}
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	switch v := n.(type) {
+	case *ast.Heading:
+		first := strings.TrimLeft(li.line(li.lineOf(maxInt(v.Pos(), 0))), " ")
+		if !strings.HasPrefix(first, "#") && setextUnderline.MatchString(li.line(end+1)) {
+			end++
+		}
+	case *extast.Table:
+		if tableDelimRow.MatchString(li.line(end+1)) && strings.Contains(li.line(end+1), "-") {
+			end++
+		}
+	}
+	return end
+}
+
+// isFenceLine reports whether a line is a code fence, ignoring any list
+// indentation or blockquote markers in front of it.
+func isFenceLine(line string) bool {
+	s := strings.TrimLeft(line, " \t>")
+	return strings.HasPrefix(s, "```") || strings.HasPrefix(s, "~~~")
+}
+
+// inlineText collects the plain text of a node's inline children.
+func inlineText(n ast.Node, src []byte) string {
+	var sb strings.Builder
+	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch v := c.(type) {
+		case *ast.Text:
+			sb.Write(v.Segment.Value(src))
+			if v.SoftLineBreak() || v.HardLineBreak() {
+				sb.WriteByte(' ')
+			}
+		case *ast.String:
+			sb.Write(v.Value)
+		}
+		return ast.WalkContinue, nil
+	})
+	return sb.String()
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
