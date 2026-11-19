@@ -154,3 +154,128 @@ func TestParseBlocks(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRawText(t *testing.T) {
+	src := "# Title\n\nIntro text.\n\n```go\nx := 1\n```\n\n- a\n- b\n"
+	blocks, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"# Title", "Intro text.", "```go\nx := 1\n```", "- a\n- b"}
+	if len(blocks) != len(want) {
+		t.Fatalf("got %d blocks, want %d", len(blocks), len(want))
+	}
+	for i, b := range blocks {
+		if b.Text != want[i] {
+			t.Errorf("block %d text = %q, want %q", i, b.Text, want[i])
+		}
+	}
+}
+
+// TestParseTextMatchesLines checks the invariant every later stage relies
+// on: a block's Text is exactly the source lines StartLine..EndLine.
+func TestParseTextMatchesLines(t *testing.T) {
+	src := "# A\n\npara one\nstill one\n\n## B\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n> quote\n\n1. a\n2. b\n\n```\ncode\n```\n"
+	lines := strings.Split(src, "\n")
+	blocks, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	prevEnd := 0
+	for i, b := range blocks {
+		if b.StartLine <= prevEnd {
+			t.Errorf("block %d starts at %d, overlapping previous end %d", i, b.StartLine, prevEnd)
+		}
+		want := strings.Join(lines[b.StartLine-1:b.EndLine], "\n")
+		if b.Text != want {
+			t.Errorf("block %d text = %q, want lines %d-%d = %q", i, b.Text, b.StartLine, b.EndLine, want)
+		}
+		prevEnd = b.EndLine
+	}
+}
+
+func TestParseHeadingPath(t *testing.T) {
+	src := strings.Join([]string{
+		"intro before any heading",
+		"",
+		"# Guide",
+		"",
+		"guide text",
+		"",
+		"## Install",
+		"",
+		"install text",
+		"",
+		"### Linux `apt`",
+		"",
+		"linux text",
+		"",
+		"## Usage",
+		"",
+		"usage text",
+		"",
+		"# Reference",
+		"",
+		"ref text",
+	}, "\n")
+	blocks, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tests := []struct {
+		text  string
+		path  []string
+		level int
+	}{
+		{"intro before any heading", []string{}, 0},
+		{"# Guide", []string{"Guide"}, 1},
+		{"guide text", []string{"Guide"}, 0},
+		{"## Install", []string{"Guide", "Install"}, 2},
+		{"install text", []string{"Guide", "Install"}, 0},
+		{"### Linux `apt`", []string{"Guide", "Install", "Linux apt"}, 3},
+		{"linux text", []string{"Guide", "Install", "Linux apt"}, 0},
+		{"## Usage", []string{"Guide", "Usage"}, 2},
+		{"usage text", []string{"Guide", "Usage"}, 0},
+		{"# Reference", []string{"Reference"}, 1},
+		{"ref text", []string{"Reference"}, 0},
+	}
+	if len(blocks) != len(tests) {
+		t.Fatalf("got %d blocks, want %d", len(blocks), len(tests))
+	}
+	for i, tt := range tests {
+		b := blocks[i]
+		if b.Text != tt.text {
+			t.Errorf("block %d text = %q, want %q", i, b.Text, tt.text)
+		}
+		if !reflect.DeepEqual(b.HeadingPath, tt.path) {
+			t.Errorf("block %d (%q) path = %v, want %v", i, tt.text, b.HeadingPath, tt.path)
+		}
+		if b.Level != tt.level {
+			t.Errorf("block %d (%q) level = %d, want %d", i, tt.text, b.Level, tt.level)
+		}
+	}
+}
+
+func TestBlockTypeString(t *testing.T) {
+	tests := []struct {
+		typ    BlockType
+		want   string
+		atomic bool
+	}{
+		{Heading, "heading", false},
+		{Paragraph, "paragraph", false},
+		{Code, "code", true},
+		{Table, "table", true},
+		{List, "list", true},
+		{Blockquote, "blockquote", false},
+		{BlockType(42), "blocktype(42)", false},
+	}
+	for _, tt := range tests {
+		if got := tt.typ.String(); got != tt.want {
+			t.Errorf("String(%d) = %q, want %q", int(tt.typ), got, tt.want)
+		}
+		if got := tt.typ.Atomic(); got != tt.atomic {
+			t.Errorf("Atomic(%s) = %v, want %v", tt.want, got, tt.atomic)
+		}
+	}
+}
