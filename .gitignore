@@ -1,0 +1,10 @@
+# Build output
+/bin/
+
+# Evaluation output and the downloaded corpus (recreate with `make eval`)
+/report/
+/testdata/corpus/
+
+# Chunk files written by the CLI defaults
+/chunks.jsonl
+/baseline.jsonl

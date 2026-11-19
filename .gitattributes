@@ -1,0 +1,7 @@
+# Golden files, fixtures and scripts are compared byte for byte or run by
+# bash: keep them LF on every platform.
+*.go     text eol=lf
+*.sh     text eol=lf
+*.jsonl  text eol=lf
+*.md     text eol=lf
+Makefile text eol=lf
