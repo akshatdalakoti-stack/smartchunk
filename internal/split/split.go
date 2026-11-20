@@ -60,3 +60,38 @@ func Structure(blocks []parse.Block) []Candidate {
 	}
 	return out
 }
+
+// Units breaks a candidate's blocks into the smallest groups worth keeping
+// together: a prose block and the code, tables and lists that directly
+// follow it (the explanation and the thing it explains). Leading headings
+// belong to the first unit.
+func Units(blocks []parse.Block) [][]parse.Block {
+	var units [][]parse.Block
+	var cur []parse.Block
+	for _, b := range blocks {
+		if IsProse(b.Type) && len(cur) > 0 && !onlyHeadings(cur) {
+			units = append(units, cur)
+			cur = nil
+		}
+		cur = append(cur, b)
+	}
+	if len(cur) > 0 {
+		units = append(units, cur)
+	}
+	return units
+}
+
+// IsProse reports whether a block type is free-flowing text, as opposed to
+// a heading or an atomic code/table/list block.
+func IsProse(t parse.BlockType) bool {
+	return t == parse.Paragraph || t == parse.Blockquote
+}
+
+func onlyHeadings(blocks []parse.Block) bool {
+	for _, b := range blocks {
+		if b.Type != parse.Heading {
+			return false
+		}
+	}
+	return true
+}
