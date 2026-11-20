@@ -279,3 +279,29 @@ func TestBlockTypeString(t *testing.T) {
 		}
 	}
 }
+
+// syntheticDoc builds a document with n sections mixing every block type.
+func syntheticDoc(n int) []byte {
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&sb, "## Section %d\n\n", i)
+		fmt.Fprintf(&sb, "This is paragraph %d. It explains the feature in a couple of sentences. Nothing fancy here.\n\n", i)
+		sb.WriteString("```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n\n")
+		sb.WriteString("| Option | Default |\n|--------|---------|\n| a | 1 |\n| b | 2 |\n\n")
+		sb.WriteString("- first item\n- second item\n  - nested item\n\n")
+		sb.WriteString("> A note worth quoting.\n\n")
+	}
+	return []byte(sb.String())
+}
+
+func BenchmarkParse(b *testing.B) {
+	src := syntheticDoc(200)
+	b.SetBytes(int64(len(src)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := Parse(src); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
