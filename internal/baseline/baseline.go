@@ -40,3 +40,63 @@ func (o Options) Validate() error {
 	}
 	return nil
 }
+
+// Split cuts source into fixed-size token windows. Every chunk is a verbatim
+// substring of the source, reported as prose because the splitter does not
+// know any better.
+func Split(sourceFile string, source []byte, opt Options) ([]chunk.Chunk, error) {
+	if err := opt.Validate(); err != nil {
+		return nil, err
+	}
+	if sourceFile == "" {
+		return nil, errors.New("baseline: source file name is empty")
+	}
+	tok := opt.Tokenizer
+	if tok == nil {
+		tok = chunk.ApproxTokenizer{}
+	}
+
+	text := strings.ReplaceAll(string(source), "\r\n", "\n")
+	spans := tok.Spans(text)
+	if len(spans) == 0 {
+		return nil, nil
+	}
+
+	// Offsets of every newline, to turn byte offsets into line numbers.
+	var newlines []int
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			newlines = append(newlines, i)
+		}
+	}
+	lineOf := func(off int) int {
+		return sort.SearchInts(newlines, off) + 1
+	}
+
+	step := opt.Size - opt.Overlap
+	var chunks []chunk.Chunk
+	for start := 0; start < len(spans); start += step {
+		end := start + opt.Size
+		if end > len(spans) {
+			end = len(spans)
+		}
+		from, to := spans[start].Start, spans[end-1].End
+		body := text[from:to]
+		startLine, endLine := lineOf(from), lineOf(to-1)
+		chunks = append(chunks, chunk.Chunk{
+			ID:          chunk.NewID(sourceFile, startLine, endLine, body),
+			Text:        body,
+			ChunkType:   chunk.Prose,
+			HeadingPath: []string{},
+			SourceFile:  sourceFile,
+			StartLine:   startLine,
+			EndLine:     endLine,
+			TokenCount:  end - start,
+			Flags:       []string{},
+		})
+		if end == len(spans) {
+			break
+		}
+	}
+	return chunks, nil
+}
