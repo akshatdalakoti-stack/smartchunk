@@ -95,3 +95,78 @@ func onlyHeadings(blocks []parse.Block) bool {
 	}
 	return true
 }
+
+// OnlyHeadings reports whether the candidate has no content below its
+// headings.
+func (c Candidate) OnlyHeadings() bool { return onlyHeadings(c.Blocks) }
+
+// Text is the chunk text: the raw text of every block, separated by blank
+// lines.
+func (c Candidate) Text() string { return JoinText(c.Blocks) }
+
+// JoinText joins the raw text of blocks with blank lines.
+func JoinText(blocks []parse.Block) string {
+	parts := make([]string, len(blocks))
+	for i, b := range blocks {
+		parts[i] = b.Text
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// StartLine is the first source line the candidate covers.
+func (c Candidate) StartLine() int {
+	if len(c.Blocks) == 0 {
+		return 0
+	}
+	return c.Blocks[0].StartLine
+}
+
+// EndLine is the last source line the candidate covers.
+func (c Candidate) EndLine() int {
+	end := 0
+	for _, b := range c.Blocks {
+		if b.EndLine > end {
+			end = b.EndLine
+		}
+	}
+	return end
+}
+
+// HeadingPath is the deepest heading chain shared by all of the candidate's
+// content. A candidate inside one section reports that section's full path;
+// one merged across sibling sections reports their common parent.
+func (c Candidate) HeadingPath() []string {
+	var path []string
+	seen := false
+	for _, b := range c.Blocks {
+		if b.Type == parse.Heading {
+			continue
+		}
+		if !seen {
+			path = append([]string{}, b.HeadingPath...)
+			seen = true
+			continue
+		}
+		path = commonPrefix(path, b.HeadingPath)
+	}
+	if !seen && len(c.Blocks) > 0 {
+		path = append([]string{}, c.Blocks[len(c.Blocks)-1].HeadingPath...)
+	}
+	if path == nil {
+		path = []string{}
+	}
+	return path
+}
+
+func commonPrefix(a, b []string) []string {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return a[:n]
+}
+
+// CommonPrefixLen returns how many leading headings two paths share.
+func CommonPrefixLen(a, b []string) int {
+	return len(commonPrefix(a, b))
+}
