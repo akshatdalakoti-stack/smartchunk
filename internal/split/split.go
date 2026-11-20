@@ -170,3 +170,56 @@ func commonPrefix(a, b []string) []string {
 func CommonPrefixLen(a, b []string) int {
 	return len(commonPrefix(a, b))
 }
+
+// Type classifies the candidate by its content, ignoring headings.
+func (c Candidate) Type() chunk.Type {
+	var code, table, prose int
+	for _, b := range c.Blocks {
+		switch b.Type {
+		case parse.Heading:
+		case parse.Code:
+			code++
+		case parse.Table:
+			table++
+		default:
+			prose++
+		}
+	}
+	switch {
+	case code > 0 && table == 0 && prose == 0:
+		return chunk.Code
+	case table > 0 && code == 0 && prose == 0:
+		return chunk.Table
+	case code == 0 && table == 0:
+		return chunk.Prose
+	default:
+		return chunk.Mixed
+	}
+}
+
+// Chunk converts the candidate into its exported form.
+func (c Candidate) Chunk(sourceFile string, tok chunk.Tokenizer) chunk.Chunk {
+	text := c.Text()
+	flags := append([]string{}, c.Flags...)
+	return chunk.Chunk{
+		ID:          chunk.NewID(sourceFile, c.StartLine(), c.EndLine(), text),
+		Text:        text,
+		ChunkType:   c.Type(),
+		HeadingPath: c.HeadingPath(),
+		SourceFile:  sourceFile,
+		StartLine:   c.StartLine(),
+		EndLine:     c.EndLine(),
+		TokenCount:  tok.Count(text),
+		Flags:       flags,
+	}
+}
+
+// AddFlag adds a flag to the candidate unless it is already present.
+func (c *Candidate) AddFlag(flag string) {
+	for _, f := range c.Flags {
+		if f == flag {
+			return
+		}
+	}
+	c.Flags = append(c.Flags, flag)
+}
