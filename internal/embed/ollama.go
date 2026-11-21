@@ -88,3 +88,117 @@ func (o *Ollama) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	}
 	return out, nil
 }
+
+// PrepareText returns the text exactly as it will be sent to the server, so
+// that a cache in front of the client can key on what was really embedded.
+func (o *Ollama) PrepareText(text string) string {
+	limit := o.MaxChars
+	if limit <= 0 {
+		limit = defaultMaxChars
+	}
+	if len(text) > limit {
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
+	}
+	if strings.TrimSpace(text) == "" {
+		// The server rejects empty input; a lone placeholder keeps the
+		// result aligned with the request.
+		return "-"
+	}
+	return text
+}
+
+func (o *Ollama) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	input := make([]string, len(texts))
+	for i, t := range texts {
+		input[i] = o.PrepareText(t)
+	}
+	body, err := json.Marshal(ollamaRequest{Model: o.Model, Input: input, Truncate: true})
+	if err != nil {
+		return nil, fmt.Errorf("encoding request: %w", err)
+	}
+
+	retries := o.Retries
+	if retries == 0 {
+		retries = defaultRetries
+	}
+	var lastErr error
+	for attempt := 0; attempt <= retries || attempt == 0; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
+		vecs, retry, err := o.post(ctx, body, len(texts))
+		if err == nil {
+			return vecs, nil
+		}
+		lastErr = err
+		if !retry || ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+// post sends one request. The second result says whether a failure is worth
+// retrying.
+func (o *Ollama) post(ctx context.Context, body []byte, want int) ([][]float32, bool, error) {
+	url := strings.TrimRight(o.BaseURL, "/") + "/api/embed"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, false, fmt.Errorf("building request for %s: %w", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := o.Client
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
+		return nil, true, fmt.Errorf("calling ollama at %s (is `ollama serve` running?): %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+	if err != nil {
+		return nil, true, fmt.Errorf("reading ollama response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := strings.TrimSpace(string(raw))
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		hint := ""
+		if resp.StatusCode == http.StatusNotFound {
+			hint = fmt.Sprintf(" (try `ollama pull %s`)", o.Model)
+		}
+		return nil, resp.StatusCode >= 500, fmt.Errorf("ollama returned %s for model %q%s: %s", resp.Status, o.Model, hint, msg)
+	}
+
+	var parsed ollamaResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, false, fmt.Errorf("decoding ollama response: %w", err)
+	}
+	if parsed.Error != "" {
+		return nil, false, fmt.Errorf("ollama error: %s", parsed.Error)
+	}
+	if len(parsed.Embeddings) != want {
+		return nil, false, fmt.Errorf("ollama returned %d embeddings for %d texts", len(parsed.Embeddings), want)
+	}
+	for i, v := range parsed.Embeddings {
+		if len(v) == 0 {
+			return nil, false, fmt.Errorf("ollama returned an empty embedding for text %d", i)
+		}
+	}
+	return parsed.Embeddings, false, nil
+}
