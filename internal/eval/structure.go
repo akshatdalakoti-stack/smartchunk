@@ -111,3 +111,39 @@ func cutStatus(b parse.Block, chunks []chunk.Chunk) (cut, intact bool) {
 	}
 	return cut, intact
 }
+
+// CutBy returns the types of the atomic blocks that the chunk holds only
+// part of, without repeats, for labelling chunks in the visual comparison.
+func CutBy(blocks []parse.Block, c chunk.Chunk) []parse.BlockType {
+	var out []parse.BlockType
+	seen := map[parse.BlockType]bool{}
+	for _, b := range blocks {
+		if !b.Type.Atomic() || seen[b.Type] {
+			continue
+		}
+		overlaps := c.StartLine <= b.EndLine && c.EndLine >= b.StartLine
+		contains := c.StartLine <= b.StartLine && c.EndLine >= b.EndLine
+		if overlaps && !contains {
+			seen[b.Type] = true
+			out = append(out, b.Type)
+		}
+	}
+	return out
+}
+
+// headingStatus reports whether some chunk holds the heading without the
+// first line of its content (stranded), and whether some chunk holds both
+// (joined).
+func headingStatus(headingLine, nextLine int, chunks []chunk.Chunk) (stranded, joined bool) {
+	for _, c := range chunks {
+		if c.StartLine > headingLine || c.EndLine < headingLine {
+			continue
+		}
+		if c.EndLine >= nextLine {
+			joined = true
+		} else {
+			stranded = true
+		}
+	}
+	return stranded, joined
+}
