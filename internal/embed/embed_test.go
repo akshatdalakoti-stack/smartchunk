@@ -484,3 +484,46 @@ func TestCachedRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestCachedPropagatesErrors(t *testing.T) {
+	boom := errors.New("backend down")
+	c, err := NewCached(&countingEmbedder{fail: boom}, "m", filepath.Join(t.TempDir(), "c.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Embed(context.Background(), []string{"x"}); !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the embedder's error", err)
+	}
+	if _, err := NewCached(nil, "m", filepath.Join(t.TempDir(), "c.bin")); err == nil {
+		t.Error("nil embedder should be rejected")
+	}
+}
+
+func TestCachedConcurrent(t *testing.T) {
+	c, err := NewCached(&countingEmbedder{}, "m", filepath.Join(t.TempDir(), "c.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				texts := []string{fmt.Sprintf("shared %d", i), fmt.Sprintf("own %d %d", g, i)}
+				vecs, err := c.Embed(context.Background(), texts)
+				if err != nil || len(vecs) != 2 || vecs[0] == nil || vecs[1] == nil {
+					t.Errorf("concurrent Embed: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	if got, want := c.Len(), 20+8*20; got != want {
+		t.Errorf("cache has %d entries, want %d", got, want)
+	}
+}
