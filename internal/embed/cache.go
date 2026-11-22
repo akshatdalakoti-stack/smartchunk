@@ -137,3 +137,109 @@ func (c *Cached) key(text string) cacheKey {
 	h.Sum(k[:0])
 	return k
 }
+
+// Embed implements Embedder. Only texts that are not in the cache reach the
+// wrapped embedder, and identical texts within one call are embedded once.
+func (c *Cached) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	keys := make([]cacheKey, len(texts))
+
+	var missTexts []string
+	var missKeys []cacheKey
+	pending := map[cacheKey]bool{}
+
+	c.mu.Lock()
+	for i, t := range texts {
+		if c.prepare != nil {
+			t = c.prepare(t)
+		}
+		k := c.key(t)
+		keys[i] = k
+		if v, ok := c.mem[k]; ok {
+			out[i] = v
+			c.hits++
+			continue
+		}
+		c.misses++
+		if !pending[k] {
+			pending[k] = true
+			missTexts = append(missTexts, t)
+			missKeys = append(missKeys, k)
+		}
+	}
+	c.mu.Unlock()
+
+	if len(missTexts) == 0 {
+		return out, nil
+	}
+
+	vecs, err := c.inner.Embed(ctx, missTexts)
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) != len(missTexts) {
+		return nil, fmt.Errorf("embed: embedder returned %d vectors for %d texts", len(vecs), len(missTexts))
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var buf []byte
+	for i, k := range missKeys {
+		if _, ok := c.mem[k]; ok {
+			continue // another goroutine stored it while we were embedding
+		}
+		c.mem[k] = vecs[i]
+		buf = appendRecord(buf, k, vecs[i])
+	}
+	if len(buf) > 0 && c.file != nil {
+		if _, err := c.file.Write(buf); err != nil {
+			return nil, fmt.Errorf("embed: writing cache: %w", err)
+		}
+	}
+	for i, k := range keys {
+		if out[i] == nil {
+			out[i] = c.mem[k]
+		}
+	}
+	return out, nil
+}
+
+func appendRecord(buf []byte, k cacheKey, vec []float32) []byte {
+	buf = append(buf, k[:]...)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(vec)))
+	for _, x := range vec {
+		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(x))
+	}
+	return buf
+}
+
+// Stats returns how many lookups were served from the cache and how many
+// had to be embedded.
+func (c *Cached) Stats() (hits, misses int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits, c.misses
+}
+
+// Len returns the number of cached vectors.
+func (c *Cached) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.mem)
+}
+
+// Close flushes and closes the cache file. The cache must not be used
+// afterwards.
+func (c *Cached) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return nil
+	}
+	err := c.file.Close()
+	c.file = nil
+	if err != nil {
+		return fmt.Errorf("embed: closing cache: %w", err)
+	}
+	return nil
+}
