@@ -158,3 +158,99 @@ func TestRefine(t *testing.T) {
 		})
 	}
 }
+
+func TestRefineRecordsSimilarity(t *testing.T) {
+	src := "# A\n\na @0\n\nb @2\n\nc @4\n\nd @80\n\n# B\n\ne @20\n\nf @22\n"
+	got, err := Refine(context.Background(), structure(t, src), &angleEmbedder{}, Options{})
+	if err != nil {
+		t.Fatalf("Refine: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d candidates, want 3: %+v", len(got), shapes(got))
+	}
+	if got[0].HasSim {
+		t.Error("the first candidate has nothing before it to be similar to")
+	}
+	wants := []float64{0, math.Cos(76 * math.Pi / 180), math.Cos(60 * math.Pi / 180)}
+	for i := 1; i < 3; i++ {
+		if !got[i].HasSim || math.Abs(got[i].SimPrev-wants[i]) > 1e-6 {
+			t.Errorf("candidate %d SimPrev = %v (has %v), want %v", i, got[i].SimPrev, got[i].HasSim, wants[i])
+		}
+	}
+}
+
+func TestRefineEdgeCases(t *testing.T) {
+	ctx := context.Background()
+	cands := structure(t, "# H\n\na @0\n\nb @2\n\nc @4\n\nd @80\n\ne @82\n")
+
+	t.Run("nil embedder is a no-op", func(t *testing.T) {
+		got, err := Refine(ctx, cands, nil, Options{})
+		if err != nil || !reflect.DeepEqual(got, cands) {
+			t.Errorf("got %+v, %v", shapes(got), err)
+		}
+	})
+	t.Run("no candidates", func(t *testing.T) {
+		emb := &angleEmbedder{}
+		got, err := Refine(ctx, nil, emb, Options{})
+		if err != nil || len(got) != 0 || emb.calls != 0 {
+			t.Errorf("got %v, %v after %d embed calls", got, err, emb.calls)
+		}
+	})
+	t.Run("single unit is not embedded", func(t *testing.T) {
+		emb := &angleEmbedder{}
+		one := structure(t, "# H\n\nonly @0\n")
+		got, err := Refine(ctx, one, emb, Options{})
+		if err != nil || len(got) != 1 || emb.calls != 0 {
+			t.Errorf("got %d candidates, %v after %d embed calls", len(got), err, emb.calls)
+		}
+	})
+	t.Run("embedder error is wrapped", func(t *testing.T) {
+		boom := errors.New("backend down")
+		_, err := Refine(ctx, cands, &angleEmbedder{err: boom}, Options{})
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "semantic") {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("wrong vector count is an error", func(t *testing.T) {
+		if _, err := Refine(ctx, cands, &angleEmbedder{short: true}, Options{}); err == nil {
+			t.Error("expected an error")
+		}
+	})
+	t.Run("works with the fake embedder", func(t *testing.T) {
+		if _, err := Refine(ctx, cands, embed.Fake{}, Options{}); err != nil {
+			t.Errorf("Refine: %v", err)
+		}
+	})
+}
+
+func TestPercentile(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []float64
+		p      float64
+		want   float64
+	}{
+		{"empty", nil, 50, 0},
+		{"single", []float64{7}, 25, 7},
+		{"median odd", []float64{3, 1, 2}, 50, 2},
+		{"median even interpolates", []float64{1, 2, 3, 4}, 50, 2.5},
+		{"quartile", []float64{1, 2, 3, 4, 5}, 25, 2},
+		{"interpolated", []float64{10, 20, 30, 40}, 25, 17.5},
+		{"min", []float64{5, 3, 9}, 0, 3},
+		{"max", []float64{5, 3, 9}, 100, 9},
+		{"below range clamps", []float64{5, 3, 9}, -10, 3},
+		{"above range clamps", []float64{5, 3, 9}, 250, 9},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Percentile(tt.values, tt.p); math.Abs(got-tt.want) > 1e-9 {
+				t.Errorf("Percentile(%v, %v) = %v, want %v", tt.values, tt.p, got, tt.want)
+			}
+		})
+	}
+	in := []float64{3, 1, 2}
+	Percentile(in, 50)
+	if !reflect.DeepEqual(in, []float64{3, 1, 2}) {
+		t.Error("Percentile sorted its input in place")
+	}
+}
