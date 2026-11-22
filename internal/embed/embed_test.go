@@ -315,3 +315,172 @@ func TestOllamaPrepareText(t *testing.T) {
 		})
 	}
 }
+
+// countingEmbedder wraps Fake and counts the texts it is asked to embed.
+type countingEmbedder struct {
+	Fake
+	mu    sync.Mutex
+	texts int
+	fail  error
+}
+
+func (c *countingEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	c.mu.Lock()
+	c.texts += len(texts)
+	fail := c.fail
+	c.mu.Unlock()
+	if fail != nil {
+		return nil, fail
+	}
+	return c.Fake.Embed(ctx, texts)
+}
+
+func TestCachedEmbedder(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sub", "cache.bin")
+	inner := &countingEmbedder{}
+
+	c, err := NewCached(inner, "model-a", path)
+	if err != nil {
+		t.Fatalf("NewCached: %v", err)
+	}
+	texts := []string{"alpha beta", "gamma delta", "alpha beta"}
+	first, err := c.Embed(ctx, texts)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if inner.texts != 2 {
+		t.Errorf("inner embedded %d texts, want 2 (duplicate collapsed)", inner.texts)
+	}
+	if !reflect.DeepEqual(first[0], first[2]) {
+		t.Error("duplicate texts got different vectors")
+	}
+	want, _ := Fake{}.Embed(ctx, texts)
+	if !reflect.DeepEqual(first, want) {
+		t.Error("cached embedder changed the vectors")
+	}
+
+	second, _ := c.Embed(ctx, texts)
+	if inner.texts != 2 {
+		t.Errorf("second call reached the inner embedder (%d texts)", inner.texts)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Error("cache hit returned different vectors")
+	}
+	if hits, misses := c.Stats(); hits != 3 || misses != 3 {
+		t.Errorf("stats = %d hits, %d misses; want 3 and 3", hits, misses)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+
+	// A new process sees the same vectors without calling the embedder.
+	inner2 := &countingEmbedder{}
+	c2, err := NewCached(inner2, "model-a", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer c2.Close()
+	if c2.Len() != 2 {
+		t.Errorf("reopened cache has %d entries, want 2", c2.Len())
+	}
+	third, _ := c2.Embed(ctx, texts)
+	if inner2.texts != 0 || !reflect.DeepEqual(first, third) {
+		t.Errorf("reopened cache missed (inner saw %d texts)", inner2.texts)
+	}
+}
+
+func TestCachedNamespace(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.bin")
+	inner := &countingEmbedder{}
+
+	a, err := NewCached(inner, "model-a", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Embed(ctx, []string{"same text"})
+	a.Close()
+
+	b, err := NewCached(inner, "model-b", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	b.Embed(ctx, []string{"same text"})
+	if inner.texts != 2 {
+		t.Errorf("a different model reused another model's vector (inner saw %d texts)", inner.texts)
+	}
+}
+
+func TestCachedRecovery(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		corrupt func(t *testing.T, path string)
+		wantErr bool
+		wantLen int
+	}{
+		{
+			name: "torn final record is dropped",
+			corrupt: func(t *testing.T, path string) {
+				f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.Write([]byte("partial-record-without-a-full-key"))
+				f.Close()
+			},
+			wantLen: 2,
+		},
+		{
+			name: "foreign file is rejected",
+			corrupt: func(t *testing.T, path string) {
+				os.WriteFile(path, []byte("this is not a cache file at all"), 0o644)
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cache.bin")
+			c, err := NewCached(Fake{}, "m", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Embed(ctx, []string{"one", "two"})
+			c.Close()
+
+			tt.corrupt(t, path)
+
+			c2, err := NewCached(Fake{}, "m", path)
+			if tt.wantErr {
+				if err == nil {
+					c2.Close()
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			if c2.Len() != tt.wantLen {
+				t.Errorf("recovered %d entries, want %d", c2.Len(), tt.wantLen)
+			}
+			// The repaired file must accept new records and reload cleanly.
+			c2.Embed(ctx, []string{"three"})
+			c2.Close()
+			c3, err := NewCached(Fake{}, "m", path)
+			if err != nil {
+				t.Fatalf("reopen after repair: %v", err)
+			}
+			defer c3.Close()
+			if c3.Len() != tt.wantLen+1 {
+				t.Errorf("after repair and append: %d entries, want %d", c3.Len(), tt.wantLen+1)
+			}
+		})
+	}
+}
