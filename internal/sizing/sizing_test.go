@@ -339,3 +339,124 @@ func TestMergePrefersSimilarNeighbour(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyInvariants runs a document with every block type through a tight
+// limit and checks the guarantees no setting may break.
+func TestApplyInvariants(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 8; i++ {
+		fmt.Fprintf(&sb, "## Section %d\n\n%s\n\n", i, sentences(5, 9))
+		fmt.Fprintf(&sb, "```go\n%s\n```\n\n", words("code", 10+i*6))
+		fmt.Fprintf(&sb, "| h1 | h2 |\n|----|----|\n| %s | v |\n\n", words("cell", 6))
+		fmt.Fprintf(&sb, "- %s\n- %s\n\n", words("li", 5), words("lj", 5))
+		fmt.Fprintf(&sb, "> %s\n\n", words("quote", 7))
+	}
+	src := sb.String()
+	blocks, err := parse.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	for _, opt := range []Options{
+		{MaxTokens: 30, MinTokens: 8},
+		{MaxTokens: 64, MinTokens: 16},
+		{MaxTokens: 256, MinTokens: 64},
+	} {
+		t.Run(fmt.Sprintf("max%d", opt.MaxTokens), func(t *testing.T) {
+			got, err := Apply(split.Structure(blocks), opt)
+			if err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			prevEnd := 0
+			var words []string
+			for i, c := range got {
+				if len(c.Blocks) == 0 {
+					t.Fatalf("chunk %d is empty", i)
+				}
+				if c.StartLine() < prevEnd {
+					t.Errorf("chunk %d starts at line %d before previous end %d", i, c.StartLine(), prevEnd)
+				}
+				prevEnd = c.EndLine()
+				if last := c.Blocks[len(c.Blocks)-1]; last.Type == parse.Heading {
+					t.Errorf("chunk %d ends with heading %q", i, last.Text)
+				}
+				n := tok.Count(c.Text())
+				hasOversized := false
+				for _, f := range c.Flags {
+					hasOversized = hasOversized || f == chunk.FlagOversized
+				}
+				if n > opt.MaxTokens && !hasOversized {
+					t.Errorf("chunk %d: %d tokens over limit %d without flag", i, n, opt.MaxTokens)
+				}
+				if n <= opt.MaxTokens && hasOversized {
+					t.Errorf("chunk %d: flagged oversized at %d tokens (limit %d)", i, n, opt.MaxTokens)
+				}
+				// Atomic blocks must appear exactly as parsed.
+				for _, b := range c.Blocks {
+					if b.Type.Atomic() && !containsBlock(blocks, b) {
+						t.Errorf("chunk %d holds an altered %s block", i, b.Type)
+					}
+				}
+				words = append(words, strings.Fields(c.Text())...)
+			}
+			// Nothing lost, nothing duplicated, order kept.
+			if want := strings.Fields(src); !reflect.DeepEqual(words, want) {
+				t.Errorf("chunks hold %d words, source has %d (or order differs)", len(words), len(want))
+			}
+		})
+	}
+}
+
+func containsBlock(blocks []parse.Block, b parse.Block) bool {
+	for _, x := range blocks {
+		if x.StartLine == b.StartLine && x.EndLine == b.EndLine && x.Text == b.Text {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSentenceSplitLineNumbers(t *testing.T) {
+	// A paragraph over lines 3-6, one sentence per line.
+	src := "# H\n\nAlpha one two three.\nBravo one two three.\nCharlie one two three.\nDelta one two three.\n"
+	got, err := Apply(structure(t, src), Options{MaxTokens: 12, MinTokens: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	type span struct{ start, end int }
+	var spans []span
+	for _, c := range got {
+		spans = append(spans, span{c.StartLine(), c.EndLine()})
+	}
+	want := []span{{1, 4}, {5, 6}}
+	if !reflect.DeepEqual(spans, want) {
+		t.Errorf("line ranges = %v, want %v (tokens %v)", spans, want, tokenCounts(got))
+	}
+}
+
+func TestOptionsValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		opt     Options
+		wantErr bool
+	}{
+		{"defaults", DefaultOptions(), false},
+		{"zero min is allowed", Options{MaxTokens: 10, MinTokens: 0}, false},
+		{"zero max", Options{MaxTokens: 0}, true},
+		{"negative max", Options{MaxTokens: -5}, true},
+		{"negative min", Options{MaxTokens: 10, MinTokens: -1}, true},
+		{"min equals max", Options{MaxTokens: 10, MinTokens: 10}, true},
+		{"min above max", Options{MaxTokens: 10, MinTokens: 20}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.opt.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if _, applyErr := Apply(nil, tt.opt); (applyErr != nil) != tt.wantErr {
+				t.Errorf("Apply() error = %v, wantErr %v", applyErr, tt.wantErr)
+			}
+		})
+	}
+}
