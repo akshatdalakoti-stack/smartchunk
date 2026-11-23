@@ -314,3 +314,103 @@ func subBlock(b parse.Block, from, to int) (parse.Block, bool) {
 		Level:       b.Level,
 	}, true
 }
+
+// mergeUndersized folds every candidate below the minimum into a neighbour,
+// as long as the result stays within the maximum. The one exception to the
+// maximum is a short lead-in directly in front of an oversized block in the
+// same section, which joins that block. Candidates that cannot be merged
+// are flagged "undersized".
+func (s sizer) mergeUndersized(cands []split.Candidate) []split.Candidate {
+	min, max := s.opt.MinTokens, s.opt.MaxTokens
+	tokens := make([]int, len(cands))
+	for i, c := range cands {
+		tokens[i] = s.countBlocks(c.Blocks)
+	}
+
+	for i := 0; i < len(cands); {
+		if tokens[i] >= min || len(cands) == 1 {
+			i++
+			continue
+		}
+		prevOK := i > 0 && tokens[i-1]+tokens[i] <= max
+		nextOK := i+1 < len(cands) && tokens[i]+tokens[i+1] <= max
+		var intoPrev bool
+		switch {
+		case prevOK && nextOK:
+			intoPrev = boundaryScore(cands[i-1], cands[i]) >= boundaryScore(cands[i], cands[i+1])
+		case prevOK:
+			intoPrev = true
+		case nextOK:
+			intoPrev = false
+		case i+1 < len(cands) && cands[i+1].Soft && hasFlag(cands[i+1], chunk.FlagOversized):
+			// The only neighbour in this section is a block that is over
+			// the limit by itself. It cannot get any less oversized, so
+			// let the short lead-in ride along and give it context rather
+			// than leave a fragment on its own.
+			intoPrev = false
+		default:
+			i++
+			continue
+		}
+		if intoPrev {
+			cands[i-1] = join(cands[i-1], cands[i])
+			tokens[i-1] += tokens[i]
+			cands = append(cands[:i], cands[i+1:]...)
+			tokens = append(tokens[:i], tokens[i+1:]...)
+			// i now points at the next candidate.
+		} else {
+			cands[i] = join(cands[i], cands[i+1])
+			tokens[i] += tokens[i+1]
+			cands = append(cands[:i+1], cands[i+2:]...)
+			tokens = append(tokens[:i+1], tokens[i+2:]...)
+			// Re-examine i: it may still be too small.
+		}
+	}
+
+	for i := range cands {
+		if tokens[i] < min {
+			cands[i].AddFlag(chunk.FlagUndersized)
+		}
+	}
+	return cands
+}
+
+func hasFlag(c split.Candidate, flag string) bool {
+	for _, f := range c.Flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// boundaryScore rates how natural it is to merge across the boundary between
+// a and the candidate b that follows it. Sharing more of the heading path
+// counts most, then being in the same section, then semantic similarity.
+func boundaryScore(a, b split.Candidate) float64 {
+	score := 10 * float64(split.CommonPrefixLen(a.HeadingPath(), b.HeadingPath()))
+	if b.Soft {
+		score += 5
+	}
+	if b.HasSim {
+		score += b.SimPrev
+	}
+	return score
+}
+
+// join appends b to a. The merged candidate keeps the boundary in front of a.
+func join(a, b split.Candidate) split.Candidate {
+	out := split.Candidate{
+		Blocks:  append(append([]parse.Block{}, a.Blocks...), b.Blocks...),
+		Soft:    a.Soft,
+		SimPrev: a.SimPrev,
+		HasSim:  a.HasSim,
+	}
+	for _, f := range a.Flags {
+		out.AddFlag(f)
+	}
+	for _, f := range b.Flags {
+		out.AddFlag(f)
+	}
+	return out
+}
