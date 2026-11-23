@@ -160,3 +160,101 @@ func (h *Hasher) Jaccard(a, b string) float64 {
 	}
 	return float64(inter) / float64(len(sa)+len(sb)-inter)
 }
+
+// Index is an LSH index over signatures. A signature is cut into bands of a
+// few rows each; two signatures that agree on every row of any one band land
+// in the same bucket and become candidates for a full comparison.
+type Index struct {
+	threshold float64
+	bands     int
+	rows      int
+	buckets   []map[uint64][]int
+	sigs      []Signature
+}
+
+// NewIndex returns an index for signatures of numHashes values that reports
+// matches with estimated similarity of at least threshold.
+func NewIndex(numHashes int, threshold float64) (*Index, error) {
+	if numHashes <= 0 {
+		return nil, fmt.Errorf("dedup: number of hashes must be positive, got %d", numHashes)
+	}
+	if threshold <= 0 || threshold > 1 || math.IsNaN(threshold) {
+		return nil, fmt.Errorf("dedup: threshold must be in (0, 1], got %v", threshold)
+	}
+	bands, rows := chooseBands(numHashes, threshold)
+	ix := &Index{threshold: threshold, bands: bands, rows: rows, buckets: make([]map[uint64][]int, bands)}
+	for i := range ix.buckets {
+		ix.buckets[i] = map[uint64][]int{}
+	}
+	return ix, nil
+}
+
+// chooseBands picks the banding for a threshold. With b bands of r rows, a
+// pair of similarity s becomes a candidate with probability 1-(1-s^r)^b, an
+// S-curve whose steep part sits near (1/b)^(1/r). The widest rows that keep
+// that point a safe margin below the threshold give the fewest false
+// candidates while still catching almost every true match.
+func chooseBands(numHashes int, threshold float64) (bands, rows int) {
+	const margin = 0.1
+	bands, rows = numHashes, 1
+	for r := 2; r <= numHashes; r++ {
+		if numHashes%r != 0 {
+			continue
+		}
+		b := numHashes / r
+		if math.Pow(1/float64(b), 1/float64(r)) <= threshold-margin {
+			bands, rows = b, r
+		}
+	}
+	return bands, rows
+}
+
+func (ix *Index) bandKey(sig Signature, band int) uint64 {
+	sum := uint64(band) + 0x9E3779B97F4A7C15
+	for _, v := range sig[band*ix.rows : (band+1)*ix.rows] {
+		sum = mix64(sum ^ v)
+	}
+	return sum
+}
+
+// Add stores a signature and returns its id. Nil signatures get an id but
+// never match anything.
+func (ix *Index) Add(sig Signature) int {
+	id := len(ix.sigs)
+	ix.sigs = append(ix.sigs, sig)
+	if len(sig) < ix.bands*ix.rows {
+		return id
+	}
+	for b := 0; b < ix.bands; b++ {
+		k := ix.bandKey(sig, b)
+		ix.buckets[b][k] = append(ix.buckets[b][k], id)
+	}
+	return id
+}
+
+// Query returns the id of the stored signature most similar to sig, and
+// that similarity, if it reaches the threshold. Otherwise it returns -1.
+// Ties go to the lowest id, so results do not depend on map order.
+func (ix *Index) Query(sig Signature) (id int, similarity float64) {
+	if len(sig) < ix.bands*ix.rows {
+		return -1, 0
+	}
+	best, bestSim := -1, 0.0
+	seen := map[int]bool{}
+	for b := 0; b < ix.bands; b++ {
+		for _, cand := range ix.buckets[b][ix.bandKey(sig, b)] {
+			if seen[cand] {
+				continue
+			}
+			seen[cand] = true
+			sim := Similarity(sig, ix.sigs[cand])
+			if sim < ix.threshold {
+				continue
+			}
+			if sim > bestSim || (sim == bestSim && cand < best) {
+				best, bestSim = cand, sim
+			}
+		}
+	}
+	return best, bestSim
+}
