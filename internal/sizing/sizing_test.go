@@ -218,3 +218,124 @@ func TestApplySplit(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyMerge(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       string
+		opt       Options
+		wantFirst []string
+		wantFlags [][]string
+	}{
+		{
+			name:      "small sections merge up to the limit",
+			src:       "# A\n\n" + words("a", 5) + "\n\n# B\n\n" + words("b", 5) + "\n\n# C\n\n" + words("c", 5) + "\n",
+			opt:       Options{MaxTokens: 100, MinTokens: 10},
+			wantFirst: []string{"# A"},
+			wantFlags: [][]string{nil},
+		},
+		{
+			name: "child section merges into its parent, not the unrelated section before",
+			src: "# One\n\n" + words("a", 20) + "\n\n# Two\n\n" + words("b", 4) + "\n\n## Two child\n\n" +
+				words("c", 20) + "\n",
+			opt:       Options{MaxTokens: 40, MinTokens: 10},
+			wantFirst: []string{"# One", "# Two"},
+			wantFlags: [][]string{nil, nil},
+		},
+		{
+			name: "tail merges back into its own section",
+			src: "# One\n\n" + words("a", 20) + "\n\n## Sub\n\n" + words("b", 3) + "\n\n# Two\n\n" +
+				words("c", 20) + "\n",
+			opt:       Options{MaxTokens: 40, MinTokens: 10},
+			wantFirst: []string{"# One", "# Two"},
+			wantFlags: [][]string{nil, nil},
+		},
+		{
+			name:      "no room in either neighbour: flagged",
+			src:       "# One\n\n" + words("a", 28) + "\n\n# Tiny\n\nfew words\n\n# Two\n\n" + words("c", 28) + "\n",
+			opt:       Options{MaxTokens: 32, MinTokens: 10},
+			wantFirst: []string{"# One", "# Tiny", "# Two"},
+			wantFlags: [][]string{nil, {chunk.FlagUndersized}, nil},
+		},
+		{
+			name:      "short lead-in rides with an oversized block, trailing text does not",
+			src:       "# H\n\nintro text here\n\n```\n" + words("code", 60) + "\n```\n\nafter text here\n",
+			opt:       Options{MaxTokens: 30, MinTokens: 10},
+			wantFirst: []string{"# H", "after text here"},
+			wantFlags: [][]string{{chunk.FlagOversized}, {chunk.FlagUndersized}},
+		},
+		{
+			name:      "single small document is kept and flagged",
+			src:       "tiny\n",
+			opt:       Options{MaxTokens: 32, MinTokens: 10},
+			wantFirst: []string{"tiny"},
+			wantFlags: [][]string{{chunk.FlagUndersized}},
+		},
+		{
+			name:      "chunks at or above the minimum are left alone",
+			src:       "# A\n\n" + words("a", 10) + "\n\n# B\n\n" + words("b", 10) + "\n",
+			opt:       Options{MaxTokens: 100, MinTokens: 10},
+			wantFirst: []string{"# A", "# B"},
+			wantFlags: [][]string{nil, nil},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Apply(structure(t, tt.src), tt.opt)
+			if err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			var first []string
+			var flags [][]string
+			for _, c := range got {
+				first = append(first, strings.SplitN(c.Text(), "\n", 2)[0])
+				flags = append(flags, c.Flags)
+			}
+			if !reflect.DeepEqual(first, tt.wantFirst) {
+				t.Errorf("chunk starts\n got: %q\nwant: %q\ntokens: %v", first, tt.wantFirst, tokenCounts(got))
+			}
+			if !reflect.DeepEqual(flags, tt.wantFlags) {
+				t.Errorf("flags\n got: %v\nwant: %v", flags, tt.wantFlags)
+			}
+		})
+	}
+}
+
+func TestMergePrefersSimilarNeighbour(t *testing.T) {
+	mk := func(text string, soft bool, sim float64) split.Candidate {
+		return split.Candidate{
+			Blocks:  []parse.Block{{Type: parse.Paragraph, Text: text, StartLine: 1, EndLine: 1, HeadingPath: []string{"H"}}},
+			Soft:    soft,
+			SimPrev: sim,
+			HasSim:  true,
+		}
+	}
+	tests := []struct {
+		name             string
+		simPrev, simNext float64
+		want             []string
+	}{
+		{"closer to previous", 0.9, 0.2, []string{words("a", 12) + "\n\ntiny one", words("c", 12)}},
+		{"closer to next", 0.2, 0.9, []string{words("a", 12), "tiny one\n\n" + words("c", 12)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cands := []split.Candidate{
+				mk(words("a", 12), false, 0),
+				mk("tiny one", true, tt.simPrev),
+				mk(words("c", 12), true, tt.simNext),
+			}
+			got, err := Apply(cands, Options{MaxTokens: 20, MinTokens: 5})
+			if err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			var texts []string
+			for _, c := range got {
+				texts = append(texts, c.Text())
+			}
+			if !reflect.DeepEqual(texts, tt.want) {
+				t.Errorf("merged\n got: %q\nwant: %q", texts, tt.want)
+			}
+		})
+	}
+}
