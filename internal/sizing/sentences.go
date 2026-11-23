@@ -44,3 +44,78 @@ func sentenceSpans(text string) [][2]int {
 	}
 	return spans
 }
+
+// boundaryAfter decides whether the terminator at offset i ends a sentence.
+// If it does, it returns the offset where the next sentence starts.
+func boundaryAfter(text string, i int, term rune) (int, bool) {
+	j := i + 1
+	for j < len(text) && strings.ContainsRune(`)"']*_`, rune(text[j])) {
+		j++
+	}
+	if j >= len(text) || !isSpace(text[j]) {
+		return 0, false
+	}
+	k := j
+	for k < len(text) && isSpace(text[k]) {
+		k++
+	}
+	if k >= len(text) {
+		return 0, false
+	}
+	next, _ := utf8.DecodeRuneInString(text[k:])
+	if !unicode.IsUpper(next) && !unicode.IsDigit(next) && !strings.ContainsRune("\"'([`*_#<>", next) {
+		return 0, false
+	}
+	if term == '.' && isFalsePeriod(text, i) {
+		return 0, false
+	}
+	return k, true
+}
+
+// isFalsePeriod reports whether the period at offset i belongs to an
+// abbreviation, an initial or a list-style number.
+func isFalsePeriod(text string, i int) bool {
+	head := strings.ToLower(text[:i+1])
+	for _, abbr := range abbreviations {
+		if strings.HasSuffix(head, abbr) {
+			before := len(head) - len(abbr)
+			if before == 0 || !isWordByte(head[before-1]) {
+				return true
+			}
+		}
+	}
+	// The word directly in front of the period.
+	w := i
+	for w > 0 && isWordByte(text[w-1]) {
+		w--
+	}
+	word := text[w:i]
+	if len(word) == 1 && unicode.IsUpper(rune(word[0])) {
+		return true // an initial, as in "J. Smith"
+	}
+	if word != "" && strings.Trim(word, "0123456789") == "" {
+		// "1. " at the start of a line is a list marker, not a sentence.
+		if w == 0 || text[w-1] == '\n' {
+			return true
+		}
+	}
+	return false
+}
+
+func isSpace(b byte) bool { return b == ' ' || b == '\n' || b == '\t' || b == '\r' }
+
+func isWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b >= 0x80
+}
+
+// SplitSentences returns the sentences of text with surrounding whitespace
+// trimmed.
+func SplitSentences(text string) []string {
+	var out []string
+	for _, s := range sentenceSpans(text) {
+		if t := strings.TrimSpace(text[s[0]:s[1]]); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
