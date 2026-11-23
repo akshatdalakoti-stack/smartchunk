@@ -105,3 +105,116 @@ func TestSentenceSpansPartition(t *testing.T) {
 		}
 	}
 }
+
+func TestApplySplit(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		opt  Options
+		// wantFirst is the first line of each resulting chunk.
+		wantFirst []string
+		wantFlags [][]string
+	}{
+		{
+			name:      "fits: untouched",
+			src:       "# H\n\n" + words("a", 10) + "\n",
+			opt:       Options{MaxTokens: 50, MinTokens: 5},
+			wantFirst: []string{"# H"},
+			wantFlags: [][]string{nil},
+		},
+		{
+			name: "cut between paragraphs, balanced",
+			// 2 + 4x15 = 62 tokens, limit 40: two parts of about 31.
+			src:       "# H\n\n" + words("a", 15) + "\n\n" + words("b", 15) + "\n\n" + words("c", 15) + "\n\n" + words("d", 15) + "\n",
+			opt:       Options{MaxTokens: 40, MinTokens: 5},
+			wantFirst: []string{"# H", "c0 c1"},
+			wantFlags: [][]string{nil, nil},
+		},
+		{
+			name: "code stays with the paragraph that introduces it",
+			src: "# H\n\n" + words("a", 20) + "\n\n" + words("b", 12) + "\n\n```\n" + words("code", 12) + "\n```\n\n" +
+				words("c", 20) + "\n",
+			opt:       Options{MaxTokens: 40, MinTokens: 5},
+			wantFirst: []string{"# H", "b0 b1", "c0 c1"},
+			wantFlags: [][]string{nil, nil, nil},
+		},
+		{
+			name:      "oversized code block stays whole",
+			src:       "# H\n\nintro text here\n\n```\n" + words("code", 60) + "\n```\n\nafter text here\n",
+			opt:       Options{MaxTokens: 30, MinTokens: 2},
+			wantFirst: []string{"# H", "```", "after text"},
+			wantFlags: [][]string{nil, {chunk.FlagOversized}, nil},
+		},
+		{
+			name:      "oversized table and list stay whole",
+			src:       "| a | b |\n|---|---|\n| " + words("x", 30) + " | y |\n\n- " + words("i", 40) + "\n- second\n",
+			opt:       Options{MaxTokens: 20, MinTokens: 2},
+			wantFirst: []string{"| a | b |", "- i0 i1"},
+			wantFlags: [][]string{{chunk.FlagOversized}, {chunk.FlagOversized}},
+		},
+		{
+			name:      "heading stays with an oversized code block",
+			src:       "# H\n\n```\n" + words("code", 60) + "\n```\n",
+			opt:       Options{MaxTokens: 30, MinTokens: 2},
+			wantFirst: []string{"# H"},
+			wantFlags: [][]string{{chunk.FlagOversized}},
+		},
+		{
+			name: "long paragraph is cut at sentence boundaries",
+			// 6 sentences of 10 tokens, limit 25: three parts of two sentences.
+			src:       "# H\n\n" + sentences(6, 10) + "\n",
+			opt:       Options{MaxTokens: 25, MinTokens: 2},
+			wantFirst: []string{"# H", "S2 w0", "S4 w0"},
+			wantFlags: [][]string{{chunk.FlagSentenceSplit}, {chunk.FlagSentenceSplit}, {chunk.FlagSentenceSplit}},
+		},
+		{
+			name:      "paragraph without sentences is cut between tokens",
+			src:       words("x", 50) + "\n",
+			opt:       Options{MaxTokens: 20, MinTokens: 2},
+			wantFirst: []string{"x0 x1", "x20 x21", "x40 x41"},
+			wantFlags: [][]string{{chunk.FlagSentenceSplit}, {chunk.FlagSentenceSplit}, {chunk.FlagSentenceSplit}},
+		},
+		{
+			name:      "blockquote holding a fence is not cut",
+			src:       "> " + words("q", 20) + "\n>\n> ```\n> " + words("c", 20) + "\n> ```\n",
+			opt:       Options{MaxTokens: 20, MinTokens: 2},
+			wantFirst: []string{"> q0 q1"},
+			wantFlags: [][]string{{chunk.FlagOversized}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Apply(structure(t, tt.src), tt.opt)
+			if err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			var first []string
+			var flags [][]string
+			for _, c := range got {
+				first = append(first, strings.SplitN(c.Text(), "\n", 2)[0])
+				flags = append(flags, c.Flags)
+			}
+			// wantFirst holds a prefix of each chunk's first line.
+			match := len(first) == len(tt.wantFirst)
+			for i := 0; match && i < len(first); i++ {
+				match = strings.HasPrefix(first[i], tt.wantFirst[i])
+			}
+			if !match {
+				t.Errorf("chunk starts\n got: %q\nwant prefixes: %q\ntokens: %v", first, tt.wantFirst, tokenCounts(got))
+			}
+			if !reflect.DeepEqual(flags, tt.wantFlags) {
+				t.Errorf("flags\n got: %v\nwant: %v", flags, tt.wantFlags)
+			}
+			for i, c := range got {
+				n := tok.Count(c.Text())
+				oversized := false
+				for _, f := range c.Flags {
+					oversized = oversized || f == chunk.FlagOversized
+				}
+				if n > tt.opt.MaxTokens && !oversized {
+					t.Errorf("chunk %d has %d tokens (limit %d) and no oversized flag", i, n, tt.opt.MaxTokens)
+				}
+			}
+		})
+	}
+}
