@@ -204,3 +204,113 @@ func splittable(b parse.Block) bool {
 		return false
 	}
 }
+
+// splitProse cuts a prose block into pieces of at most budget tokens,
+// preferring sentence boundaries, then line breaks, then (for a single line
+// with no usable boundary at all) a hard cut between tokens.
+func (s sizer) splitProse(b parse.Block, budget int) []parse.Block {
+	text := b.Text
+	var segs [][2]int
+	for _, sp := range sentenceSpans(text) {
+		if s.count(text[sp[0]:sp[1]]) <= budget {
+			segs = append(segs, sp)
+			continue
+		}
+		for _, ln := range lineSpans(text, sp) {
+			if s.count(text[ln[0]:ln[1]]) <= budget {
+				segs = append(segs, ln)
+				continue
+			}
+			segs = append(segs, s.hardSpans(text, ln, budget)...)
+		}
+	}
+
+	total := s.count(text)
+	parts := int(math.Ceil(float64(total) / float64(budget)))
+	target := float64(total) / float64(parts)
+
+	var pieces []parse.Block
+	start, end, tokens := -1, -1, 0
+	flush := func() {
+		if start < 0 {
+			return
+		}
+		if p, ok := subBlock(b, start, end); ok {
+			pieces = append(pieces, p)
+		}
+		start, end, tokens = -1, -1, 0
+	}
+	for _, sg := range segs {
+		t := s.count(text[sg[0]:sg[1]])
+		if start >= 0 && tokens+t > budget {
+			flush()
+		}
+		if start < 0 {
+			start = sg[0]
+		}
+		end = sg[1]
+		tokens += t
+		if float64(tokens) >= target {
+			flush()
+		}
+	}
+	flush()
+	if len(pieces) == 0 {
+		return []parse.Block{b}
+	}
+	return pieces
+}
+
+// lineSpans splits a span of text at newlines.
+func lineSpans(text string, sp [2]int) [][2]int {
+	var out [][2]int
+	start := sp[0]
+	for i := sp[0]; i < sp[1]; i++ {
+		if text[i] == '\n' {
+			out = append(out, [2]int{start, i + 1})
+			start = i + 1
+		}
+	}
+	if start < sp[1] {
+		out = append(out, [2]int{start, sp[1]})
+	}
+	return out
+}
+
+// hardSpans cuts a span every budget tokens. It is the last resort for text
+// with no sentence or line boundary to use.
+func (s sizer) hardSpans(text string, sp [2]int, budget int) [][2]int {
+	toks := s.opt.Tokenizer.Spans(text[sp[0]:sp[1]])
+	if len(toks) == 0 {
+		return [][2]int{sp}
+	}
+	var out [][2]int
+	start := sp[0]
+	for i := budget; i < len(toks); i += budget {
+		cut := sp[0] + toks[i].Start
+		out = append(out, [2]int{start, cut})
+		start = cut
+	}
+	return append(out, [2]int{start, sp[1]})
+}
+
+// subBlock builds a block from the byte range [from, to) of b's text,
+// trimming whitespace and working out the piece's own line range.
+func subBlock(b parse.Block, from, to int) (parse.Block, bool) {
+	raw := b.Text[from:to]
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return parse.Block{}, false
+	}
+	lead := from + strings.Index(raw, trimmed)
+	startLine := b.StartLine + strings.Count(b.Text[:lead], "\n")
+	endLine := startLine + strings.Count(trimmed, "\n")
+	return parse.Block{
+		Type:        b.Type,
+		Text:        trimmed,
+		StartLine:   startLine,
+		EndLine:     endLine,
+		HeadingPath: b.HeadingPath,
+		Level:       b.Level,
+	}, true
+}
