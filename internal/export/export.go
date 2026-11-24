@@ -94,3 +94,27 @@ func ReadJSONL(r io.Reader) ([]chunk.Chunk, error) {
 	}
 	return chunks, nil
 }
+
+// EmbeddingText is the text to embed for a chunk: the chunk's heading path
+// as a one-line breadcrumb, then the chunk itself. A chunk cut from the
+// middle of a section carries no heading of its own, and the breadcrumb is
+// what tells the embedding model which topic it belongs to.
+//
+// If the chunk already opens with its own section heading, that heading is
+// left out of the breadcrumb so it is not embedded twice.
+func EmbeddingText(c chunk.Chunk) string {
+	path := c.HeadingPath
+	if n := len(path); n > 0 {
+		first := strings.SplitN(c.Text, "\n", 2)[0]
+		if strings.HasPrefix(first, "#") {
+			title := strings.TrimSpace(strings.Trim(strings.TrimSpace(first), "#"))
+			if title == path[n-1] {
+				path = path[:n-1]
+			}
+		}
+	}
+	if len(path) == 0 {
+		return c.Text
+	}
+	return strings.Join(path, " > ") + "\n\n" + c.Text
+}
