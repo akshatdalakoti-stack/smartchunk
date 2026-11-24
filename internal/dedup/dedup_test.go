@@ -381,3 +381,45 @@ func TestStripLines(t *testing.T) {
 		}
 	})
 }
+
+func BenchmarkSignature(b *testing.B) {
+	h := NewHasher(DefaultNumHashes, DefaultShingleSize)
+	text := strings.Join(vocabText(1, 300), " ")
+	b.SetBytes(int64(len(text)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h.Signature(text)
+	}
+}
+
+func BenchmarkFindDuplicates(b *testing.B) {
+	// 2000 chunks of 200 words, a tenth of them near-duplicates.
+	texts := make([]string, 2000)
+	for i := range texts {
+		seed := int64(i)
+		if i%10 == 9 {
+			seed = int64(i - 1)
+		}
+		texts[i] = strings.Join(vocabText(seed, 200), " ")
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dup, err := FindDuplicates(texts, Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if i == 0 {
+			n := 0
+			for _, d := range dup {
+				if d >= 0 {
+					n++
+				}
+			}
+			if n != 200 {
+				b.Fatalf("found %d duplicates, want 200", n)
+			}
+		}
+	}
+}
