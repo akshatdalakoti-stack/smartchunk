@@ -258,3 +258,55 @@ func (ix *Index) Query(sig Signature) (id int, similarity float64) {
 	}
 	return best, bestSim
 }
+
+// Options configures near-duplicate detection.
+type Options struct {
+	// Threshold is the estimated Jaccard similarity at or above which a
+	// text counts as a duplicate. Zero means DefaultThreshold.
+	Threshold float64
+	// NumHashes is the signature length. Zero means DefaultNumHashes.
+	NumHashes int
+	// ShingleSize is the number of words per shingle. Zero means
+	// DefaultShingleSize.
+	ShingleSize int
+}
+
+func (o Options) withDefaults() Options {
+	if o.Threshold == 0 {
+		o.Threshold = DefaultThreshold
+	}
+	if o.NumHashes <= 0 {
+		o.NumHashes = DefaultNumHashes
+	}
+	if o.ShingleSize <= 0 {
+		o.ShingleSize = DefaultShingleSize
+	}
+	return o
+}
+
+// FindDuplicates returns, for every text, the index of the earlier text it
+// is a near-duplicate of, or -1 if it is the first of its kind. Duplicates
+// always point at a text that is itself kept, so dropping every text with a
+// non-negative entry leaves one representative of each group.
+func FindDuplicates(texts []string, opt Options) ([]int, error) {
+	opt = opt.withDefaults()
+	ix, err := NewIndex(opt.NumHashes, opt.Threshold)
+	if err != nil {
+		return nil, err
+	}
+	hasher := NewHasher(opt.NumHashes, opt.ShingleSize)
+
+	dupOf := make([]int, len(texts))
+	kept := make([]int, 0, len(texts)) // index id -> position in texts
+	for i, t := range texts {
+		sig := hasher.Signature(t)
+		if id, _ := ix.Query(sig); id >= 0 {
+			dupOf[i] = kept[id]
+			continue
+		}
+		dupOf[i] = -1
+		ix.Add(sig)
+		kept = append(kept, i)
+	}
+	return dupOf, nil
+}
