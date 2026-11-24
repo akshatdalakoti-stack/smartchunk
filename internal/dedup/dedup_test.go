@@ -102,3 +102,91 @@ func TestMinHashEstimatesJaccard(t *testing.T) {
 		})
 	}
 }
+
+func TestChooseBands(t *testing.T) {
+	tests := []struct {
+		hashes    int
+		threshold float64
+		wantRows  int
+	}{
+		{128, 0.85, 8},
+		{128, 0.95, 8},
+		{128, 1.0, 16},
+		{128, 0.5, 2},
+		{128, 0.2, 1},
+		{64, 0.85, 4},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d@%.2f", tt.hashes, tt.threshold), func(t *testing.T) {
+			bands, rows := chooseBands(tt.hashes, tt.threshold)
+			if rows != tt.wantRows || bands*rows != tt.hashes {
+				t.Errorf("chooseBands = %d bands x %d rows, want %d rows", bands, rows, tt.wantRows)
+			}
+			// A pair right at the threshold must almost always be a candidate.
+			p := 1 - math.Pow(1-math.Pow(tt.threshold, float64(rows)), float64(bands))
+			if p < 0.95 {
+				t.Errorf("recall at the threshold is only %.3f", p)
+			}
+		})
+	}
+}
+
+func TestNewIndexValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		hashes    int
+		threshold float64
+		wantErr   bool
+	}{
+		{"ok", 128, 0.85, false},
+		{"threshold one", 128, 1, false},
+		{"zero hashes", 0, 0.85, true},
+		{"zero threshold", 128, 0, true},
+		{"negative threshold", 128, -0.1, true},
+		{"threshold above one", 128, 1.01, true},
+		{"nan threshold", 128, math.NaN(), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewIndex(tt.hashes, tt.threshold)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("NewIndex error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIndexQuery(t *testing.T) {
+	h := NewHasher(128, 3)
+	ix, err := NewIndex(128, 0.8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := strings.Join(vocabText(7, 300), " ")
+	other := strings.Join(vocabText(8, 300), " ")
+	ix.Add(h.Signature(other))
+	ix.Add(h.Signature(base))
+	ix.Add(nil)
+
+	tests := []struct {
+		name   string
+		text   string
+		wantID int
+	}{
+		{"exact copy", base, 1},
+		{"copy with a few extra words", base + " and a short tail", 1},
+		{"unrelated", strings.Join(vocabText(9, 300), " "), -1},
+		{"no words", "!!!", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, sim := ix.Query(h.Signature(tt.text))
+			if id != tt.wantID {
+				t.Errorf("Query = id %d (sim %.2f), want id %d", id, sim, tt.wantID)
+			}
+			if id >= 0 && sim < 0.8 {
+				t.Errorf("returned similarity %.2f is below the threshold", sim)
+			}
+		})
+	}
+}
