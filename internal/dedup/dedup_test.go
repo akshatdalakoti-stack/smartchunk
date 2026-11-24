@@ -190,3 +190,194 @@ func TestIndexQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestFindDuplicates(t *testing.T) {
+	a := strings.Join(vocabText(1, 200), " ")
+	b := strings.Join(vocabText(2, 200), " ")
+	c := strings.Join(vocabText(3, 200), " ")
+	aEdited := strings.Replace(a, "word", "term", 3)    // 3 of 200 words differ
+	aHalf := strings.Join(strings.Fields(a)[:100], " ") // Jaccard about 0.5
+
+	tests := []struct {
+		name  string
+		texts []string
+		opt   Options
+		want  []int
+	}{
+		{"empty", nil, Options{}, []int{}},
+		{"all different", []string{a, b, c}, Options{}, []int{-1, -1, -1}},
+		{"exact duplicate", []string{a, b, a}, Options{}, []int{-1, -1, 0}},
+		{"near duplicate", []string{a, aEdited}, Options{}, []int{-1, 0}},
+		{"reformatted duplicate", []string{a, strings.ReplaceAll(strings.ToUpper(a), " ", "\n")}, Options{}, []int{-1, 0}},
+		{"half overlap is kept at 0.85", []string{a, aHalf}, Options{}, []int{-1, -1}},
+		{"half overlap is dropped at 0.4", []string{a, aHalf}, Options{Threshold: 0.4}, []int{-1, 0}},
+		{"chain points at the kept original", []string{a, a, a}, Options{}, []int{-1, 0, 0}},
+		{"empty texts are never duplicates", []string{"", "", "..."}, Options{}, []int{-1, -1, -1}},
+		{"short identical texts", []string{"ok", "ok"}, Options{}, []int{-1, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := FindDuplicates(tt.texts, tt.opt)
+			if err != nil {
+				t.Fatalf("FindDuplicates: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("FindDuplicates = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	if _, err := FindDuplicates([]string{a}, Options{Threshold: 1.5}); err == nil {
+		t.Error("threshold above 1 should be rejected")
+	}
+}
+
+func para(text string, start int, typ parse.BlockType) parse.Block {
+	return parse.Block{Type: typ, Text: text, StartLine: start, EndLine: start + strings.Count(text, "\n")}
+}
+
+func TestRepeatedLines(t *testing.T) {
+	footer := "Back to the documentation index"
+	var cands []split.Candidate
+	for i := 0; i < 10; i++ {
+		body := fmt.Sprintf("Unique body text number %d.\n%s", i, footer)
+		cands = append(cands, split.Candidate{Blocks: []parse.Block{
+			para(body, 1, parse.Paragraph),
+			para("```\nshared code line here\n```", 4, parse.Code),
+		}})
+	}
+	// A line that appears in only two chunks.
+	cands[0].Blocks = append(cands[0].Blocks, para("See the related section.", 8, parse.Paragraph))
+	cands[1].Blocks = append(cands[1].Blocks, para("See the related section.", 8, parse.Paragraph))
+
+	tests := []struct {
+		name string
+		opt  LineOptions
+		want []string
+	}{
+		{"defaults catch the footer only", LineOptions{}, []string{"back to the documentation index"}},
+		{"low bar catches the rarer line too", LineOptions{MinRepeats: 2, MinRatio: 0.1}, []string{"back to the documentation index", "see the related section."}},
+		{"ratio can veto", LineOptions{MinRepeats: 2, MinRatio: 1.1}, nil},
+		{"length filter", LineOptions{MinLength: 100}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RepeatedLines(cands, tt.opt)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for _, w := range tt.want {
+				if !got[w] {
+					t.Errorf("missing %q in %v", w, got)
+				}
+			}
+		})
+	}
+}
+
+func TestStripLines(t *testing.T) {
+	lines := map[string]bool{"edit this page": true, "copyright acme": true}
+	tests := []struct {
+		name       string
+		blocks     []parse.Block
+		wantTexts  []string
+		wantLines  [][2]int
+		wantFlag   bool
+		wantRemove int
+		wantGone   bool
+	}{
+		{
+			name:      "untouched",
+			blocks:    []parse.Block{para("Plain text.\nMore text.", 5, parse.Paragraph)},
+			wantTexts: []string{"Plain text.\nMore text."},
+			wantLines: [][2]int{{5, 6}},
+		},
+		{
+			name:       "trailing line removed shrinks the range",
+			blocks:     []parse.Block{para("Real content.\nEdit this page", 5, parse.Paragraph)},
+			wantTexts:  []string{"Real content."},
+			wantLines:  [][2]int{{5, 5}},
+			wantFlag:   true,
+			wantRemove: 1,
+		},
+		{
+			name:       "leading line removed shifts the start",
+			blocks:     []parse.Block{para("  Copyright   ACME\nReal content.\nMore.", 5, parse.Paragraph)},
+			wantTexts:  []string{"Real content.\nMore."},
+			wantLines:  [][2]int{{6, 7}},
+			wantFlag:   true,
+			wantRemove: 1,
+		},
+		{
+			name: "emptied block is dropped, rest stays",
+			blocks: []parse.Block{
+				para("# H", 1, parse.Heading),
+				para("Keep me.", 3, parse.Paragraph),
+				para("Edit this page", 5, parse.Paragraph),
+			},
+			wantTexts:  []string{"# H", "Keep me."},
+			wantLines:  [][2]int{{1, 1}, {3, 3}},
+			wantFlag:   true,
+			wantRemove: 1,
+		},
+		{
+			name: "code is never stripped",
+			blocks: []parse.Block{
+				para("Text.", 1, parse.Paragraph),
+				para("```\nEdit this page\n```", 3, parse.Code),
+			},
+			wantTexts: []string{"Text.", "```\nEdit this page\n```"},
+			wantLines: [][2]int{{1, 1}, {3, 5}},
+		},
+		{
+			name: "chunk left with only a heading is dropped",
+			blocks: []parse.Block{
+				para("# Footer", 1, parse.Heading),
+				para("Edit this page\nCopyright ACME", 3, parse.Paragraph),
+			},
+			wantRemove: 2,
+			wantGone:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, removed := StripLines([]split.Candidate{{Blocks: tt.blocks}}, lines)
+			if removed != tt.wantRemove {
+				t.Errorf("removed %d lines, want %d", removed, tt.wantRemove)
+			}
+			if tt.wantGone {
+				if len(got) != 0 {
+					t.Errorf("candidate should be dropped, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d candidates, want 1", len(got))
+			}
+			var texts []string
+			var ranges [][2]int
+			for _, b := range got[0].Blocks {
+				texts = append(texts, b.Text)
+				ranges = append(ranges, [2]int{b.StartLine, b.EndLine})
+			}
+			if !reflect.DeepEqual(texts, tt.wantTexts) {
+				t.Errorf("texts = %q, want %q", texts, tt.wantTexts)
+			}
+			if !reflect.DeepEqual(ranges, tt.wantLines) {
+				t.Errorf("line ranges = %v, want %v", ranges, tt.wantLines)
+			}
+			hasFlag := len(got[0].Flags) == 1 && got[0].Flags[0] == chunk.FlagBoilerplateStripped
+			if hasFlag != tt.wantFlag {
+				t.Errorf("flags = %v, want flag %v", got[0].Flags, tt.wantFlag)
+			}
+		})
+	}
+
+	t.Run("no lines is a no-op", func(t *testing.T) {
+		in := []split.Candidate{{Blocks: []parse.Block{para("x", 1, parse.Paragraph)}}}
+		got, removed := StripLines(in, nil)
+		if removed != 0 || !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, removed %d", got, removed)
+		}
+	})
+}
