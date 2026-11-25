@@ -186,3 +186,109 @@ func chunkDoc(ctx context.Context, source []byte, opt Options) ([]split.Candidat
 	}
 	return sizing.Apply(cands, opt.sizing())
 }
+
+// Run chunks every document and returns the chunks in document order.
+func Run(ctx context.Context, docs []Doc, opt Options) ([]chunk.Chunk, Stats, error) {
+	opt = opt.withDefaults()
+	if err := opt.sizing().Validate(); err != nil {
+		return nil, Stats{}, fmt.Errorf("pipeline: %w", err)
+	}
+
+	perDoc := make([][]split.Candidate, len(docs))
+	err := ForEach(ctx, len(docs), opt.Workers, func(ctx context.Context, i int) error {
+		src, err := docs[i].Read()
+		if err != nil {
+			return err
+		}
+		cands, err := chunkDoc(ctx, src, opt)
+		if err != nil {
+			return fmt.Errorf("chunking %s: %w", docs[i].Name, err)
+		}
+		perDoc[i] = cands
+		return nil
+	})
+	if err != nil {
+		return nil, Stats{}, fmt.Errorf("pipeline: %w", err)
+	}
+
+	stats := Stats{Docs: len(docs)}
+
+	// Corpus-level noise removal, stage one: repeated lines.
+	if !opt.KeepRepeatedLines {
+		var all []split.Candidate
+		for _, cands := range perDoc {
+			all = append(all, cands...)
+		}
+		lines := dedup.RepeatedLines(all, opt.Lines)
+		for i := range perDoc {
+			var n int
+			perDoc[i], n = dedup.StripLines(perDoc[i], lines)
+			stats.LinesStripped += n
+		}
+	}
+
+	var chunks []chunk.Chunk
+	for i, cands := range perDoc {
+		for _, c := range cands {
+			chunks = append(chunks, c.Chunk(docs[i].Name, opt.Tokenizer))
+		}
+	}
+
+	// Stage two: near-duplicate chunks. The first occurrence is kept.
+	if opt.DedupThreshold >= 0 {
+		texts := make([]string, len(chunks))
+		for i, c := range chunks {
+			texts[i] = c.Text
+		}
+		dupOf, err := dedup.FindDuplicates(texts, dedup.Options{Threshold: opt.DedupThreshold})
+		if err != nil {
+			return nil, Stats{}, fmt.Errorf("pipeline: %w", err)
+		}
+		kept := chunks[:0]
+		for i, c := range chunks {
+			if dupOf[i] >= 0 {
+				stats.DuplicatesDrop++
+				continue
+			}
+			kept = append(kept, c)
+		}
+		chunks = kept
+	}
+
+	for _, c := range chunks {
+		if c.HasFlag(chunk.FlagOversized) {
+			stats.Oversized++
+		}
+	}
+	stats.Chunks = len(chunks)
+	return chunks, stats, nil
+}
+
+// RunBaseline chunks every document with the fixed-size splitter and
+// returns the chunks in document order.
+func RunBaseline(ctx context.Context, docs []Doc, opt baseline.Options, workers int) ([]chunk.Chunk, error) {
+	if err := opt.Validate(); err != nil {
+		return nil, fmt.Errorf("pipeline: %w", err)
+	}
+	perDoc := make([][]chunk.Chunk, len(docs))
+	err := ForEach(ctx, len(docs), workers, func(ctx context.Context, i int) error {
+		src, err := docs[i].Read()
+		if err != nil {
+			return err
+		}
+		chunks, err := baseline.Split(docs[i].Name, src, opt)
+		if err != nil {
+			return fmt.Errorf("splitting %s: %w", docs[i].Name, err)
+		}
+		perDoc[i] = chunks
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: %w", err)
+	}
+	var out []chunk.Chunk
+	for _, chunks := range perDoc {
+		out = append(out, chunks...)
+	}
+	return out, nil
+}
