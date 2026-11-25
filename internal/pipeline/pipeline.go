@@ -292,3 +292,63 @@ func RunBaseline(ctx context.Context, docs []Doc, opt baseline.Options, workers 
 	}
 	return out, nil
 }
+
+// ForEach calls fn for every index in [0, n) using a pool of workers. It
+// returns the first error and cancels the context passed to the remaining
+// calls. fn must write its result somewhere indexed by i; ForEach itself
+// imposes no ordering on when each call runs.
+func ForEach(ctx context.Context, n, workers int, fn func(ctx context.Context, i int) error) error {
+	if n == 0 {
+		return ctx.Err()
+	}
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	if workers > n {
+		workers = n
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int)
+	var (
+		wg       sync.WaitGroup
+		once     sync.Once
+		firstErr error
+	)
+	fail := func(err error) {
+		once.Do(func() {
+			firstErr = err
+			cancel()
+		})
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if ctx.Err() != nil {
+					continue // drain without working once something failed
+				}
+				if err := fn(ctx, i); err != nil {
+					fail(err)
+				}
+			}
+		}()
+	}
+feed:
+	for i := 0; i < n; i++ {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
