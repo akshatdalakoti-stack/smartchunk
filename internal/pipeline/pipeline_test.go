@@ -422,3 +422,52 @@ func TestForEach(t *testing.T) {
 		}
 	})
 }
+
+// syntheticDoc builds a document of n sections with every block type. The
+// seed varies the vocabulary so different documents are not duplicates.
+func syntheticDoc(seed, n int) []byte {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# Document %d\n\nOverview of topic%d and why it matters to readers of volume%d.\n\n", seed, seed, seed)
+	for i := 0; i < n; i++ {
+		tag := fmt.Sprintf("s%dx%d", seed, i)
+		fmt.Fprintf(&sb, "## Section %s\n\n", tag)
+		fmt.Fprintf(&sb, "The %s component reads its settings from %s.yaml. It validates every key before use. Unknown keys for %s are reported as warnings.\n\n", tag, tag, tag)
+		fmt.Fprintf(&sb, "A second paragraph about %s covers failure handling. When %s cannot start it writes a report and exits with a %s status.\n\n", tag, tag, tag)
+		fmt.Fprintf(&sb, "```go\nfunc run%s() error {\n\tcfg, err := load(%q)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn start(cfg)\n}\n```\n\n", tag, tag)
+		fmt.Fprintf(&sb, "| Key | Default |\n|-----|---------|\n| %s.timeout | 30s |\n| %s.retries | 3 |\n\n", tag, tag)
+		fmt.Fprintf(&sb, "- enable %s logging\n- rotate %s logs daily\n  - keep seven days\n\n", tag, tag)
+		fmt.Fprintf(&sb, "> Note for %s: restart after changing the file.\n\n", tag)
+	}
+	return []byte(sb.String())
+}
+
+func BenchmarkPipeline(b *testing.B) {
+	var docs []Doc
+	bytesTotal := 0
+	for i := 0; i < 50; i++ {
+		src := syntheticDoc(i, 20)
+		bytesTotal += len(src)
+		docs = append(docs, Doc{Name: fmt.Sprintf("doc%02d.md", i), Source: src})
+	}
+	for _, bc := range []struct {
+		name string
+		emb  embed.Embedder
+	}{
+		{"structure_only", nil},
+		{"with_semantic_fake_embedder", embed.Fake{}},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.SetBytes(int64(bytesTotal))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				chunks, _, err := Run(context.Background(), docs, Options{Embedder: bc.emb})
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(chunks) == 0 {
+					b.Fatal("no chunks")
+				}
+			}
+		})
+	}
+}
