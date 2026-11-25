@@ -263,3 +263,162 @@ func TestRunOptions(t *testing.T) {
 		})
 	}
 }
+
+type failingEmbedder struct{ err error }
+
+func (f failingEmbedder) Embed(context.Context, []string) ([][]float32, error) { return nil, f.err }
+
+func TestRunErrors(t *testing.T) {
+	boom := errors.New("embedding backend down")
+	docs := []Doc{{Name: "ok.md", Source: syntheticDoc(1, 4)}}
+
+	t.Run("embedder failure names the document", func(t *testing.T) {
+		_, _, err := Run(context.Background(), docs, Options{Embedder: failingEmbedder{boom}})
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "ok.md") {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("missing file", func(t *testing.T) {
+		missing := []Doc{{Name: "gone.md", Path: filepath.Join(t.TempDir(), "gone.md")}}
+		_, _, err := Run(context.Background(), missing, Options{})
+		if err == nil || !strings.Contains(err.Error(), "gone.md") {
+			t.Errorf("err = %v", err)
+		}
+		if _, err := RunBaseline(context.Background(), missing, baseline.DefaultOptions(), 2); err == nil {
+			t.Error("baseline should fail on a missing file too")
+		}
+	})
+	t.Run("cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := Run(ctx, docs, Options{Embedder: embed.Fake{}})
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	})
+	t.Run("invalid baseline options", func(t *testing.T) {
+		if _, err := RunBaseline(context.Background(), docs, baseline.Options{Size: 0}, 1); err == nil {
+			t.Error("expected an error")
+		}
+	})
+}
+
+func TestDiscover(t *testing.T) {
+	root := t.TempDir()
+	files := []string{
+		"b.md", "a.md", "notes.txt", "sub/c.markdown", "sub/deep/d.MD",
+		".git/hidden.md", "node_modules/pkg/readme.md", ".hidden/e.md",
+	}
+	for _, f := range files {
+		path := filepath.Join(root, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("# x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name    string
+		root    string
+		want    []string
+		wantErr bool
+	}{
+		{"directory is walked, sorted and filtered", root, []string{"a.md", "b.md", "sub/c.markdown", "sub/deep/d.MD"}, false},
+		{"single file", filepath.Join(root, "sub", "c.markdown"), []string{"c.markdown"}, false},
+		{"missing path", filepath.Join(root, "nope"), nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			docs, err := Discover(tt.root)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			var names []string
+			for _, d := range docs {
+				names = append(names, d.Name)
+			}
+			if !reflect.DeepEqual(names, tt.want) {
+				t.Errorf("names = %v, want %v", names, tt.want)
+			}
+		})
+	}
+}
+
+func TestForEach(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("visits every index once", func(t *testing.T) {
+		for _, workers := range []int{0, 1, 3, 100} {
+			seen := make([]int32, 50)
+			err := ForEach(ctx, len(seen), workers, func(_ context.Context, i int) error {
+				atomic.AddInt32(&seen[i], 1)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("workers=%d: %v", workers, err)
+			}
+			for i, n := range seen {
+				if n != 1 {
+					t.Errorf("workers=%d: index %d visited %d times", workers, i, n)
+				}
+			}
+		}
+	})
+	t.Run("zero items", func(t *testing.T) {
+		if err := ForEach(ctx, 0, 4, func(context.Context, int) error { return errors.New("never called") }); err != nil {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("first error stops the rest", func(t *testing.T) {
+		boom := errors.New("boom")
+		var calls int32
+		err := ForEach(ctx, 1000, 2, func(_ context.Context, i int) error {
+			atomic.AddInt32(&calls, 1)
+			if i == 3 {
+				return boom
+			}
+			return nil
+		})
+		if !errors.Is(err, boom) {
+			t.Errorf("err = %v, want boom", err)
+		}
+		if n := atomic.LoadInt32(&calls); n > 100 {
+			t.Errorf("%d calls ran after the failure; the pool did not stop", n)
+		}
+	})
+	t.Run("never exceeds the worker count", func(t *testing.T) {
+		var mu sync.Mutex
+		active, peak := 0, 0
+		err := ForEach(ctx, 60, 4, func(context.Context, int) error {
+			mu.Lock()
+			active++
+			if active > peak {
+				peak = active
+			}
+			mu.Unlock()
+			for i := 0; i < 1000; i++ {
+				_ = fmt.Sprint(i)
+			}
+			mu.Lock()
+			active--
+			mu.Unlock()
+			return nil
+		})
+		if err != nil || peak > 4 {
+			t.Errorf("peak concurrency %d (limit 4), err %v", peak, err)
+		}
+	})
+	t.Run("parent cancellation is reported", func(t *testing.T) {
+		cctx, cancel := context.WithCancel(ctx)
+		err := ForEach(cctx, 100, 2, func(_ context.Context, i int) error {
+			if i == 0 {
+				cancel()
+			}
+			return nil
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	})
+}
