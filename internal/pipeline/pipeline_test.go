@@ -147,3 +147,119 @@ func TestGoldenBaseline(t *testing.T) {
 	}
 	checkGolden(t, "baseline.jsonl", chunks)
 }
+
+// TestRunGuarantees checks the promises of the pipeline against the parsed
+// source, independently of the golden files.
+func TestRunGuarantees(t *testing.T) {
+	docs, err := Discover(inputDir)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	opt := goldenOptions()
+	chunks, _, err := Run(context.Background(), docs, opt)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	byFile := map[string][]chunk.Chunk{}
+	ids := map[string]bool{}
+	for _, c := range chunks {
+		byFile[c.SourceFile] = append(byFile[c.SourceFile], c)
+		if ids[c.ID] {
+			t.Errorf("duplicate chunk id %s", c.ID)
+		}
+		ids[c.ID] = true
+		if c.TokenCount != (chunk.ApproxTokenizer{}).Count(c.Text) {
+			t.Errorf("chunk %s: token_count %d does not match its text", c.ID, c.TokenCount)
+		}
+		if c.TokenCount > opt.MaxTokens && !c.HasFlag(chunk.FlagOversized) {
+			t.Errorf("chunk %s has %d tokens and no oversized flag", c.ID, c.TokenCount)
+		}
+		if c.StartLine < 1 || c.EndLine < c.StartLine {
+			t.Errorf("chunk %s has line range %d-%d", c.ID, c.StartLine, c.EndLine)
+		}
+	}
+	for _, d := range docs {
+		src, err := d.Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks, err := parse.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range blocks {
+			if !b.Type.Atomic() {
+				continue
+			}
+			for _, c := range byFile[d.Name] {
+				overlaps := c.StartLine <= b.EndLine && c.EndLine >= b.StartLine
+				contains := c.StartLine <= b.StartLine && c.EndLine >= b.EndLine
+				if overlaps && !contains {
+					t.Errorf("%s: chunk %d-%d cuts the %s block at %d-%d", d.Name, c.StartLine, c.EndLine, b.Type, b.StartLine, b.EndLine)
+				}
+				if contains && !strings.Contains(c.Text, b.Text) {
+					t.Errorf("%s: %s block at %d-%d is not verbatim in its chunk", d.Name, b.Type, b.StartLine, b.EndLine)
+				}
+			}
+		}
+	}
+}
+
+func TestRunDeterministicAcrossWorkers(t *testing.T) {
+	// Enough documents that the workers genuinely interleave.
+	var docs []Doc
+	for i := 0; i < 40; i++ {
+		docs = append(docs, Doc{Name: fmt.Sprintf("doc%02d.md", i), Source: syntheticDoc(i, 6)})
+	}
+	var want []chunk.Chunk
+	for _, workers := range []int{1, 2, 8, 32} {
+		opt := Options{MaxTokens: 80, MinTokens: 20, Workers: workers, Embedder: embed.Fake{}}
+		got, _, err := Run(context.Background(), docs, opt)
+		if err != nil {
+			t.Fatalf("Run with %d workers: %v", workers, err)
+		}
+		if want == nil {
+			want = got
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("output with %d workers differs from output with 1 worker", workers)
+		}
+	}
+	for i := 1; i < len(want); i++ {
+		if want[i].SourceFile < want[i-1].SourceFile {
+			t.Fatalf("chunks are not in document order: %s after %s", want[i].SourceFile, want[i-1].SourceFile)
+		}
+	}
+}
+
+func TestRunOptions(t *testing.T) {
+	doc := []Doc{
+		{Name: "a.md", Source: []byte("# A\n\n" + strings.Repeat("Same sentence here every time. ", 12) + "\n")},
+		{Name: "b.md", Source: []byte("# A\n\n" + strings.Repeat("Same sentence here every time. ", 12) + "\n")},
+	}
+	tests := []struct {
+		name       string
+		opt        Options
+		wantChunks int
+		wantErr    bool
+	}{
+		{"near-duplicate document is dropped", Options{MaxTokens: 200, MinTokens: 10}, 1, false},
+		{"dedup off keeps both", Options{MaxTokens: 200, MinTokens: 10, DedupThreshold: -1}, 2, false},
+		{"defaults apply", Options{}, 1, false},
+		{"negative minimum turns merging off", Options{MaxTokens: 200, MinTokens: -1, DedupThreshold: -1}, 2, false},
+		{"min above max is rejected", Options{MaxTokens: 10, MinTokens: 20}, 0, true},
+		{"bad dedup threshold is rejected", Options{DedupThreshold: 1.5}, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks, stats, err := Run(context.Background(), doc, tt.opt)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && (len(chunks) != tt.wantChunks || stats.Chunks != tt.wantChunks || stats.Docs != 2) {
+				t.Errorf("got %d chunks (stats %+v), want %d", len(chunks), stats, tt.wantChunks)
+			}
+		})
+	}
+}
