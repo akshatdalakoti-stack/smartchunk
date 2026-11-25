@@ -102,3 +102,87 @@ func isMarkdown(name string) bool {
 	}
 	return false
 }
+
+// Options configures a pipeline run.
+type Options struct {
+	// MaxTokens and MinTokens are the chunk size range. Zero means the
+	// sizing defaults; a negative MinTokens turns merging off.
+	MaxTokens int
+	MinTokens int
+	// DedupThreshold is the estimated Jaccard similarity at which a chunk
+	// is dropped as a near-duplicate. Zero means the dedup default; a
+	// negative value turns near-duplicate removal off.
+	DedupThreshold float64
+	// Percentile is the semantic boundary percentile. Zero means the
+	// semantic default.
+	Percentile float64
+	// Workers is the number of documents processed at once. Zero means
+	// one per CPU.
+	Workers int
+	// Embedder powers the semantic stage. Nil skips that stage.
+	Embedder embed.Embedder
+	// Tokenizer defaults to chunk.ApproxTokenizer.
+	Tokenizer chunk.Tokenizer
+	// Lines tunes repeated-line removal.
+	Lines dedup.LineOptions
+	// KeepRepeatedLines turns repeated-line removal off.
+	KeepRepeatedLines bool
+}
+
+func (o Options) withDefaults() Options {
+	d := sizing.DefaultOptions()
+	if o.MaxTokens == 0 {
+		o.MaxTokens = d.MaxTokens
+	}
+	switch {
+	case o.MinTokens < 0:
+		o.MinTokens = 0
+	case o.MinTokens == 0:
+		o.MinTokens = d.MinTokens
+		if o.MinTokens >= o.MaxTokens {
+			o.MinTokens = o.MaxTokens / 4
+		}
+	}
+	if o.Workers <= 0 {
+		o.Workers = runtime.NumCPU()
+	}
+	if o.Tokenizer == nil {
+		o.Tokenizer = chunk.ApproxTokenizer{}
+	}
+	return o
+}
+
+func (o Options) sizing() sizing.Options {
+	return sizing.Options{MaxTokens: o.MaxTokens, MinTokens: o.MinTokens, Tokenizer: o.Tokenizer}
+}
+
+// Stats summarises what a run did.
+type Stats struct {
+	Docs           int
+	Chunks         int
+	LinesStripped  int
+	DuplicatesDrop int
+	Oversized      int
+}
+
+// ChunkDoc runs the per-document stages on one document's source and
+// returns its candidates.
+func ChunkDoc(ctx context.Context, source []byte, opt Options) ([]split.Candidate, error) {
+	return chunkDoc(ctx, source, opt.withDefaults())
+}
+
+// chunkDoc expects options that already have their defaults applied.
+// Applying them twice would turn an explicit "no merging" back into the
+// default minimum.
+func chunkDoc(ctx context.Context, source []byte, opt Options) ([]split.Candidate, error) {
+	blocks, err := parse.Parse(source)
+	if err != nil {
+		return nil, err
+	}
+	cands := split.Structure(blocks)
+	cands, err = semantic.Refine(ctx, cands, opt.Embedder, semantic.Options{Percentile: opt.Percentile})
+	if err != nil {
+		return nil, err
+	}
+	return sizing.Apply(cands, opt.sizing())
+}
