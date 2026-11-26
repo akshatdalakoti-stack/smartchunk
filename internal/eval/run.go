@@ -228,3 +228,123 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	return report, nil
 }
+
+func smartSettings(o pipeline.Options) string {
+	max, min := o.MaxTokens, o.MinTokens
+	if max == 0 {
+		max = 256
+	}
+	if min == 0 {
+		min = 64
+	}
+	if min < 0 {
+		min = 0
+	}
+	s := fmt.Sprintf("max %d, min %d tokens", max, min)
+	if o.Embedder == nil {
+		s += ", no semantic stage"
+	}
+	return s
+}
+
+// measure fills in every metric of a system from its chunks.
+func measure(ctx context.Context, sys *System, docs []pipeline.Doc, blocks map[string][]parse.Block, questions []Question, cfg Config, textOf func(chunk.Chunk) string) error {
+	sys.Docs = len(docs)
+	byFile := map[string][]chunk.Chunk{}
+	for _, c := range sys.Chunks {
+		byFile[c.SourceFile] = append(byFile[c.SourceFile], c)
+		if c.HasFlag(chunk.FlagOversized) {
+			sys.Oversized++
+		}
+	}
+	for _, d := range docs {
+		sys.Structure.Add(MeasureStructure(blocks[d.Name], byFile[d.Name]))
+	}
+
+	var err error
+	sys.Duplicates, sys.DupRate, err = MeasureDuplicates(sys.Chunks, cfg.DuplicateThreshold)
+	if err != nil {
+		return err
+	}
+	sys.Tokens = MeasureTokens(sys.Chunks)
+
+	// A tiny corpus can finish inside one tick of the system clock. Treat
+	// that as one microsecond rather than report an infinite rate.
+	if sys.Elapsed < time.Microsecond {
+		sys.Elapsed = time.Microsecond
+	}
+	secs := sys.Elapsed.Seconds()
+	sys.DocsPerSec = float64(len(docs)) / secs
+	sys.ChunksPerSec = float64(len(sys.Chunks)) / secs
+
+	sys.Retrieval, sys.PerQuestion, err = MeasureRetrieval(ctx, sys.Chunks, questions, cfg.Embedder, textOf)
+	if err != nil {
+		return fmt.Errorf("%s: %w", sys.Name, err)
+	}
+	return nil
+}
+
+func countLines(src []byte) int {
+	if len(src) == 0 {
+		return 0
+	}
+	n := 1
+	for i, b := range src {
+		if b == '\n' && i < len(src)-1 {
+			n++
+		}
+	}
+	return n
+}
+
+// maxCompareLines keeps the visual comparison to a document that can be
+// read in one sitting.
+const maxCompareLines = 400
+
+// pickCompareDoc returns the requested document, or else the document of
+// readable length in which the baseline cuts the most blocks.
+func pickCompareDoc(requested string, docs []pipeline.Doc, blocks map[string][]parse.Block, lineCount map[string]int, baseChunks []chunk.Chunk) (string, error) {
+	if requested != "" {
+		requested = filepath.ToSlash(requested)
+		if _, ok := blocks[requested]; !ok {
+			return "", fmt.Errorf("eval: compare document %q is not in the corpus", requested)
+		}
+		return requested, nil
+	}
+	byFile := map[string][]chunk.Chunk{}
+	for _, c := range baseChunks {
+		byFile[c.SourceFile] = append(byFile[c.SourceFile], c)
+	}
+	type scored struct {
+		name  string
+		score int
+		kinds int
+		short bool
+	}
+	var all []scored
+	for _, d := range docs {
+		s := MeasureStructure(blocks[d.Name], byFile[d.Name])
+		kinds := 0
+		for _, n := range []int{s.CodeCut, s.TableCut, s.ListCut} {
+			if n > 0 {
+				kinds++
+			}
+		}
+		all = append(all, scored{d.Name, s.Violations() + s.OrphanHeadings, kinds, lineCount[d.Name] <= maxCompareLines})
+	}
+	// Prefer readable documents, then variety of damage, then amount.
+	sort.SliceStable(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		if a.short != b.short {
+			return a.short
+		}
+		if a.kinds != b.kinds {
+			return a.kinds > b.kinds
+		}
+		if a.score != b.score {
+			return a.score > b.score
+		}
+		return a.name < b.name
+	})
+	return all[0].name, nil
+}
