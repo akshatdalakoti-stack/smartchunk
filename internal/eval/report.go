@@ -158,3 +158,205 @@ func rankCell(results []QuestionResult, i int) string {
 	}
 	return cell
 }
+
+// compareCard is one chunk as drawn in compare.html.
+type compareCard struct {
+	Number  int
+	Type    string
+	Lines   string
+	Tokens  int
+	Path    string
+	Flags   []string
+	Damage  []string
+	Text    string
+	Damaged bool
+}
+
+type compareColumn struct {
+	Name     string
+	Settings string
+	Summary  string
+	Clean    bool
+	Cards    []compareCard
+}
+
+type compareData struct {
+	Doc     string
+	Columns []compareColumn
+}
+
+// CompareHTML renders one document chunked by both systems, side by side.
+// Every chunk is drawn as a card whose colour shows its type; chunks that
+// cut a block or strand a heading are marked.
+func CompareHTML(r *Report, blocks []parse.Block) ([]byte, error) {
+	data := compareData{Doc: r.CompareDoc}
+	for _, sys := range []System{r.Baseline, r.Smart} {
+		var chunks []chunk.Chunk
+		for _, c := range sys.Chunks {
+			if c.SourceFile == r.CompareDoc {
+				chunks = append(chunks, c)
+			}
+		}
+		st := MeasureStructure(blocks, chunks)
+		col := compareColumn{
+			Name:     sys.Name,
+			Settings: sys.Settings,
+			Summary:  fmt.Sprintf("%d chunks, %d blocks cut, %d orphan headings", len(chunks), st.Violations(), st.OrphanHeadings),
+			Clean:    st.Violations() == 0 && st.OrphanHeadings == 0,
+		}
+		for i, c := range chunks {
+			card := compareCard{
+				Number: i + 1,
+				Type:   string(c.ChunkType),
+				Lines:  fmt.Sprintf("%d-%d", c.StartLine, c.EndLine),
+				Tokens: c.TokenCount,
+				Path:   strings.Join(c.HeadingPath, " > "),
+				Flags:  c.Flags,
+				Text:   c.Text,
+			}
+			if sys.Name == r.Baseline.Name {
+				// The baseline calls everything prose. Colour its chunks
+				// by what they really contain.
+				card.Type = string(typeByOverlap(blocks, c))
+			}
+			for _, t := range CutBy(blocks, c) {
+				card.Damage = append(card.Damage, "cuts a "+blockLabel(t))
+			}
+			if strandsHeading(blocks, c) {
+				card.Damage = append(card.Damage, "ends on a heading")
+			}
+			card.Damaged = len(card.Damage) > 0
+			col.Cards = append(col.Cards, card)
+		}
+		data.Columns = append(data.Columns, col)
+	}
+	var buf bytes.Buffer
+	if err := compareTemplate.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("eval: rendering compare.html: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func blockLabel(t parse.BlockType) string {
+	if t == parse.Code {
+		return "code block"
+	}
+	return t.String()
+}
+
+// typeByOverlap classifies a chunk by the blocks its line range touches.
+func typeByOverlap(blocks []parse.Block, c chunk.Chunk) chunk.Type {
+	var code, table, prose int
+	for _, b := range blocks {
+		if c.StartLine > b.EndLine || c.EndLine < b.StartLine {
+			continue
+		}
+		switch b.Type {
+		case parse.Heading:
+		case parse.Code:
+			code++
+		case parse.Table:
+			table++
+		default:
+			prose++
+		}
+	}
+	switch {
+	case code > 0 && table == 0 && prose == 0:
+		return chunk.Code
+	case table > 0 && code == 0 && prose == 0:
+		return chunk.Table
+	case code == 0 && table == 0:
+		return chunk.Prose
+	default:
+		return chunk.Mixed
+	}
+}
+
+// strandsHeading reports whether the chunk's last block is a heading whose
+// content starts after the chunk ends.
+func strandsHeading(blocks []parse.Block, c chunk.Chunk) bool {
+	for i, b := range blocks {
+		if b.Type != parse.Heading || i+1 >= len(blocks) {
+			continue
+		}
+		if b.StartLine >= c.StartLine && b.StartLine <= c.EndLine && blocks[i+1].StartLine > c.EndLine {
+			return true
+		}
+	}
+	return false
+}
+
+var compareTemplate = template.Must(template.New("compare").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartChunk comparison: {{.Doc}}</title>
+<style>
+:root {
+  --bg: #f5f4f0; --panel: #ffffff; --ink: #1d2126; --muted: #5f6b7a; --line: #dedbd2;
+  --code: #2b6cd9; --table: #0b8f6c; --prose: #7b8492; --mixed: #a8479a; --bad: #c0362c;
+  --bad-bg: #fdecea; --ok: #0b8f6c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131519; --panel: #1b1e24; --ink: #e5e7ea; --muted: #98a2ae; --line: #2b3038;
+    --code: #73a5ff; --table: #3fcaa0; --prose: #8a93a0; --mixed: #dc8bcb; --bad: #ff8478;
+    --bad-bg: #3a1d1b; --ok: #3fcaa0;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header.page { padding: 24px 24px 8px; max-width: 1500px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.doc { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; background: var(--c); }
+main { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 16px 24px 48px; max-width: 1500px; margin: 0 auto; align-items: start; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } header.page { padding: 16px 16px 8px; } }
+.col > h2 { position: sticky; top: 0; z-index: 1; background: var(--bg); margin: 0; padding: 10px 0; font-size: 16px; border-bottom: 2px solid var(--line); }
+.col > h2 small { display: block; font-weight: 400; color: var(--muted); font-size: 12.5px; }
+.col > h2 .sum { color: var(--bad); }
+.col > h2 .sum.clean { color: var(--ok); }
+.chunk { background: var(--panel); border: 1px solid var(--line); border-left: 5px solid var(--c); border-radius: 6px; margin-top: 12px; overflow: hidden; }
+.chunk.damaged { border-color: var(--bad); border-left-color: var(--c); }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 7px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.meta b { color: var(--c); text-transform: uppercase; letter-spacing: .04em; }
+.tag { border: 1px solid var(--line); border-radius: 10px; padding: 0 8px; }
+.tag.bad { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); font-weight: 600; }
+.path { padding: 5px 12px 0; font-size: 12px; color: var(--muted); }
+pre { margin: 0; padding: 10px 12px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; }
+.t-code { --c: var(--code); } .t-table { --c: var(--table); } .t-prose { --c: var(--prose); } .t-mixed { --c: var(--mixed); }
+</style>
+</head>
+<body>
+<header class="page">
+  <h1>One document, two chunkers</h1>
+  <div class="doc">{{.Doc}}</div>
+  <div class="legend">
+    <span class="t-code">code</span><span class="t-table">table</span><span class="t-prose">prose</span><span class="t-mixed">mixed</span>
+    <span style="--c: var(--bad)">red outline: the chunk cuts a block or strands a heading</span>
+  </div>
+</header>
+<main>
+{{range .Columns}}
+  <section class="col">
+    <h2>{{.Name}} <small>{{.Settings}}</small><small class="sum{{if .Clean}} clean{{end}}">{{.Summary}}</small></h2>
+    {{range .Cards}}
+    <article class="chunk t-{{.Type}}{{if .Damaged}} damaged{{end}}">
+      <div class="meta">
+        <b>{{.Type}}</b><span>#{{.Number}}</span><span>lines {{.Lines}}</span><span>{{.Tokens}} tokens</span>
+        {{range .Flags}}<span class="tag">{{.}}</span>{{end}}
+        {{range .Damage}}<span class="tag bad">{{.}}</span>{{end}}
+      </div>
+      {{if .Path}}<div class="path">{{.Path}}</div>{{end}}
+      <pre>{{.Text}}</pre>
+    </article>
+    {{end}}
+  </section>
+{{end}}
+</main>
+</body>
+</html>
+`))
