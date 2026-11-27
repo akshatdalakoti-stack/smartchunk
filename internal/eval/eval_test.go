@@ -565,3 +565,63 @@ func TestRunOptionsAndErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestTypeByOverlapAndStrandedHeading(t *testing.T) {
+	blocks, err := parse.Parse([]byte(structDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		start, end int
+		wantType   chunk.Type
+		wantStrand bool
+	}{
+		{"prose only", 1, 3, chunk.Prose, false},
+		{"inside the code block", 6, 7, chunk.Code, false},
+		{"inside the table", 13, 14, chunk.Table, false},
+		{"list is prose", 17, 19, chunk.Prose, false},
+		{"prose and code", 3, 6, chunk.Mixed, false},
+		{"ends on a heading", 5, 11, chunk.Code, true},
+		{"heading with its content", 11, 15, chunk.Table, false},
+		{"final heading has nothing to be cut from", 17, 21, chunk.Prose, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := chunk.Chunk{StartLine: tt.start, EndLine: tt.end}
+			if got := typeByOverlap(blocks, c); got != tt.wantType {
+				t.Errorf("typeByOverlap = %q, want %q", got, tt.wantType)
+			}
+			if got := strandsHeading(blocks, c); got != tt.wantStrand {
+				t.Errorf("strandsHeading = %v, want %v", got, tt.wantStrand)
+			}
+		})
+	}
+}
+
+func TestFormatHelpers(t *testing.T) {
+	tests := []struct {
+		got, want string
+	}{
+		{pct(0.625), "62.5%"},
+		{pct(0), "0.0%"},
+		{ratio(3, 12), "3 / 12 (25.0%)"},
+		{ratio(0, 0), "0 / 0"},
+		{rate(1234.5), "1234"},
+		{rate(45.67), "45.7"},
+		{rate(3.14159), "3.14"},
+		{dur(1500 * time.Millisecond), "1.50 s"},
+		{dur(42 * time.Second), "42.0 s"},
+		{dur(250 * time.Millisecond), "250 ms"},
+		{escapeCell("a|b\nc"), `a\|b c`},
+		{orDash(""), "-"},
+		{rankCell([]QuestionResult{{Rank: 2, Complete5: true}}, 0), "2 *"},
+		{rankCell([]QuestionResult{{}}, 0), "-"},
+		{rankCell(nil, 3), "-"},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("got %q, want %q", tt.got, tt.want)
+		}
+	}
+}
