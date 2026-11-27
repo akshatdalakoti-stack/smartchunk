@@ -207,3 +207,123 @@ func TestMeasureRetrieval(t *testing.T) {
 		}
 	})
 }
+
+func TestMeasureTokens(t *testing.T) {
+	mk := func(counts ...int) []chunk.Chunk {
+		out := make([]chunk.Chunk, len(counts))
+		for i, n := range counts {
+			out[i] = chunk.Chunk{TokenCount: n}
+		}
+		return out
+	}
+	hundred := make([]int, 100)
+	for i := range hundred {
+		hundred[i] = i + 1
+	}
+	tests := []struct {
+		name   string
+		chunks []chunk.Chunk
+		want   TokenStats
+	}{
+		{"none", nil, TokenStats{}},
+		{"one", mk(42), TokenStats{Mean: 42, P95: 42, Max: 42}},
+		{"unsorted input", mk(30, 10, 20), TokenStats{Mean: 20, P95: 30, Max: 30}},
+		{"one to a hundred", mk(hundred...), TokenStats{Mean: 50.5, P95: 95, Max: 100}},
+		{"outlier sets max, not p95", mk(append(make([]int, 99), 1000)...), TokenStats{Mean: 10, P95: 0, Max: 1000}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MeasureTokens(tt.chunks); got != tt.want {
+				t.Errorf("MeasureTokens = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMeasureDuplicates(t *testing.T) {
+	long := func(seed string) string {
+		var sb strings.Builder
+		for i := 0; i < 60; i++ {
+			fmt.Fprintf(&sb, "%s%d ", seed, i)
+		}
+		return sb.String()
+	}
+	tests := []struct {
+		name      string
+		texts     []string
+		threshold float64
+		wantCount int
+		wantErr   bool
+	}{
+		{"none", nil, 0.85, 0, false},
+		{"all distinct", []string{long("a"), long("b"), long("c")}, 0.85, 0, false},
+		{"two copies of one", []string{long("a"), long("b"), long("a"), long("a")}, 0.85, 2, false},
+		{"bad threshold", []string{long("a")}, 2, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := make([]chunk.Chunk, len(tt.texts))
+			for i, text := range tt.texts {
+				chunks[i] = chunk.Chunk{Text: text}
+			}
+			count, rate, err := MeasureDuplicates(chunks, tt.threshold)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if count != tt.wantCount {
+				t.Errorf("count = %d, want %d", count, tt.wantCount)
+			}
+			if len(chunks) > 0 && math.Abs(rate-float64(tt.wantCount)/float64(len(chunks))) > 1e-9 {
+				t.Errorf("rate = %v", rate)
+			}
+		})
+	}
+}
+
+func TestLoadQuestions(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+		wantErr string
+	}{
+		{
+			name:    "valid with blank lines",
+			content: "{\"question\":\"q1\",\"source_file\":\"a.md\",\"answer_start_line\":1,\"answer_end_line\":3}\n\n{\"question\":\"q2\",\"source_file\":\"sub\\\\b.md\",\"answer_start_line\":5,\"answer_end_line\":5}\n",
+			want:    2,
+		},
+		{"empty file", "", 0, "no questions"},
+		{"bad json", "{nope}\n", 0, "line 1"},
+		{"missing question", "{\"source_file\":\"a.md\",\"answer_start_line\":1,\"answer_end_line\":1}\n", 0, "question is empty"},
+		{"missing file", "{\"question\":\"q\",\"answer_start_line\":1,\"answer_end_line\":1}\n", 0, "source_file is empty"},
+		{"zero start", "{\"question\":\"q\",\"source_file\":\"a.md\",\"answer_start_line\":0,\"answer_end_line\":1}\n", 0, "not a valid range"},
+		{"end before start", "{\"question\":\"q\",\"source_file\":\"a.md\",\"answer_start_line\":5,\"answer_end_line\":4}\n", 0, "not a valid range"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "q.jsonl")
+			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadQuestions(path)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("err = %v, want it to mention %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || len(got) != tt.want {
+				t.Fatalf("got %d questions, err %v", len(got), err)
+			}
+			if got[1].SourceFile != "sub/b.md" {
+				t.Errorf("backslashes were not normalised: %q", got[1].SourceFile)
+			}
+		})
+	}
+	if _, err := LoadQuestions(filepath.Join(t.TempDir(), "missing.jsonl")); err == nil {
+		t.Error("missing file should be an error")
+	}
+}
