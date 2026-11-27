@@ -242,3 +242,113 @@ func (e *embedFlags) build(ctx context.Context) (embedder, error) {
 		return embedder{}, usagef("unknown --embedder %q", e.kind)
 	}
 }
+
+func onePath(positional []string, what string) (string, error) {
+	switch len(positional) {
+	case 0:
+		return "", usagef("missing <path>: give the Markdown file or directory to %s", what)
+	case 1:
+		return positional[0], nil
+	default:
+		return "", usagef("expected one <path>, got %d: %v", len(positional), positional)
+	}
+}
+
+func discover(path string) ([]pipeline.Doc, error) {
+	docs, err := pipeline.Discover(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("no Markdown files (.md, .markdown) found in %s", path)
+	}
+	return docs, nil
+}
+
+func cmdRun(ctx context.Context, args []string, stderr io.Writer) error {
+	fs := newFlagSet("run", stderr, "run <path> --out chunks.jsonl [flags]")
+	var size sizeFlags
+	var emb embedFlags
+	size.register(fs)
+	emb.register(fs, "ollama, fake (deterministic, for tests) or none (skip the semantic stage)")
+	out := fs.String("out", "chunks.jsonl", `output JSONL file ("-" for standard output)`)
+
+	positional, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	path, err := onePath(positional, "chunk")
+	if err != nil {
+		return err
+	}
+	opt, err := size.options()
+	if err != nil {
+		return err
+	}
+	docs, err := discover(path)
+	if err != nil {
+		return err
+	}
+	e, err := emb.build(ctx)
+	if err != nil {
+		return err
+	}
+	defer e.close()
+	opt.Embedder = e.Embedder
+
+	start := time.Now()
+	chunks, stats, err := pipeline.Run(ctx, docs, opt)
+	if err != nil {
+		return err
+	}
+	if err := export.WriteFile(*out, chunks); err != nil {
+		return err
+	}
+	if err := e.close(); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "smartchunk: %d documents -> %d chunks in %s (%d near-duplicates dropped, %d repeated lines stripped, %d oversized) -> %s\n",
+		stats.Docs, stats.Chunks, time.Since(start).Round(time.Millisecond), stats.DuplicatesDrop, stats.LinesStripped, stats.Oversized, *out)
+	return nil
+}
+
+func cmdBaseline(ctx context.Context, args []string, stderr io.Writer) error {
+	fs := newFlagSet("baseline", stderr, "baseline <path> --out baseline.jsonl [flags]")
+	d := baseline.DefaultOptions()
+	size := fs.Int("size", d.Size, "window size, in tokens")
+	overlap := fs.Int("overlap", d.Overlap, "tokens shared by consecutive windows")
+	workers := fs.Int("workers", runtime.NumCPU(), "documents processed at once")
+	out := fs.String("out", "baseline.jsonl", `output JSONL file ("-" for standard output)`)
+
+	positional, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	path, err := onePath(positional, "split")
+	if err != nil {
+		return err
+	}
+	opt := baseline.Options{Size: *size, Overlap: *overlap}
+	if err := opt.Validate(); err != nil {
+		return usageError{err.Error()}
+	}
+	if *workers <= 0 {
+		return usagef("--workers must be positive, got %d", *workers)
+	}
+	docs, err := discover(path)
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
+	chunks, err := pipeline.RunBaseline(ctx, docs, opt, *workers)
+	if err != nil {
+		return err
+	}
+	if err := export.WriteFile(*out, chunks); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "smartchunk: %d documents -> %d chunks in %s -> %s\n",
+		len(docs), len(chunks), time.Since(start).Round(time.Millisecond), *out)
+	return nil
+}
