@@ -128,3 +128,117 @@ func newFlagSet(name string, stderr io.Writer, synopsis string) *flag.FlagSet {
 	}
 	return fs
 }
+
+// sizeFlags are the chunking flags shared by run and eval.
+type sizeFlags struct {
+	maxTokens, minTokens int
+	dedupThreshold       float64
+	percentile           float64
+	workers              int
+}
+
+func (s *sizeFlags) register(fs *flag.FlagSet) {
+	d := sizing.DefaultOptions()
+	fs.IntVar(&s.maxTokens, "max-tokens", d.MaxTokens, "largest chunk, in tokens")
+	fs.IntVar(&s.minTokens, "min-tokens", d.MinTokens, "chunks smaller than this are merged into a neighbour (0 turns merging off)")
+	fs.Float64Var(&s.dedupThreshold, "dedup-threshold", dedup.DefaultThreshold, "Jaccard similarity at which a chunk is dropped as a near-duplicate (0 keeps duplicates)")
+	fs.Float64Var(&s.percentile, "percentile", 25, "cut sections where neighbour similarity is below this percentile of the document")
+	fs.IntVar(&s.workers, "workers", runtime.NumCPU(), "documents processed at once")
+}
+
+func (s *sizeFlags) options() (pipeline.Options, error) {
+	if s.maxTokens <= 0 {
+		return pipeline.Options{}, usagef("--max-tokens must be positive, got %d", s.maxTokens)
+	}
+	if s.minTokens < 0 || s.minTokens >= s.maxTokens {
+		return pipeline.Options{}, usagef("--min-tokens must be between 0 and --max-tokens (%d), got %d", s.maxTokens, s.minTokens)
+	}
+	if s.dedupThreshold < 0 || s.dedupThreshold > 1 {
+		return pipeline.Options{}, usagef("--dedup-threshold must be between 0 and 1, got %v", s.dedupThreshold)
+	}
+	if s.percentile <= 0 || s.percentile > 100 {
+		return pipeline.Options{}, usagef("--percentile must be in (0, 100], got %v", s.percentile)
+	}
+	if s.workers <= 0 {
+		return pipeline.Options{}, usagef("--workers must be positive, got %d", s.workers)
+	}
+	opt := pipeline.Options{
+		MaxTokens:      s.maxTokens,
+		MinTokens:      s.minTokens,
+		DedupThreshold: s.dedupThreshold,
+		Percentile:     s.percentile,
+		Workers:        s.workers,
+	}
+	// In pipeline.Options zero means "use the default"; an explicit zero on
+	// the command line means "off".
+	if s.minTokens == 0 {
+		opt.MinTokens = -1
+	}
+	if s.dedupThreshold == 0 {
+		opt.DedupThreshold = -1
+	}
+	return opt, nil
+}
+
+// embedFlags select and configure the embedder.
+type embedFlags struct {
+	kind     string
+	url      string
+	model    string
+	cacheDir string
+	noCache  bool
+}
+
+func (e *embedFlags) register(fs *flag.FlagSet, kinds string) {
+	fs.StringVar(&e.kind, "embedder", "ollama", "embedder to use: "+kinds)
+	fs.StringVar(&e.url, "ollama-url", embed.DefaultOllamaURL, "address of the Ollama server")
+	fs.StringVar(&e.model, "model", embed.DefaultOllamaModel, "Ollama embedding model")
+	fs.StringVar(&e.cacheDir, "cache-dir", "", "directory of the embedding cache (default: the user cache directory)")
+	fs.BoolVar(&e.noCache, "no-cache", false, "do not read or write the embedding cache")
+}
+
+// embedder is a configured embedder plus what is needed to describe it and
+// shut it down.
+type embedder struct {
+	embed.Embedder
+	name  string
+	stats func() (hits, misses int)
+	close func() error
+}
+
+// build creates the embedder the flags describe. For Ollama it also sends
+// one tiny request, so a server that is down is reported before any work
+// starts instead of halfway through a corpus.
+func (e *embedFlags) build(ctx context.Context) (embedder, error) {
+	none := func() error { return nil }
+	switch e.kind {
+	case "none":
+		return embedder{name: "none", close: none}, nil
+	case "fake":
+		return embedder{Embedder: embed.Fake{}, name: "fake (deterministic hashed bag of words)", close: none}, nil
+	case "ollama":
+		client := embed.NewOllama(e.url, e.model)
+		if _, err := client.Embed(ctx, []string{"ping"}); err != nil {
+			return embedder{}, fmt.Errorf("%w\nstart the server with `ollama serve` and `ollama pull %s`, or pass --embedder none to chunk without the semantic stage", err, e.model)
+		}
+		name := fmt.Sprintf("Ollama %s at %s", e.model, e.url)
+		if e.noCache {
+			return embedder{Embedder: client, name: name, close: none}, nil
+		}
+		dir := e.cacheDir
+		if dir == "" {
+			base, err := os.UserCacheDir()
+			if err != nil {
+				return embedder{}, fmt.Errorf("locating the cache directory (pass --cache-dir or --no-cache): %w", err)
+			}
+			dir = filepath.Join(base, "smartchunk")
+		}
+		cached, err := embed.NewCached(client, e.model, filepath.Join(dir, "embeddings.bin"))
+		if err != nil {
+			return embedder{}, err
+		}
+		return embedder{Embedder: cached, name: name, stats: cached.Stats, close: cached.Close}, nil
+	default:
+		return embedder{}, usagef("unknown --embedder %q", e.kind)
+	}
+}
