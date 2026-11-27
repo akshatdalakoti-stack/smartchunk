@@ -327,3 +327,241 @@ func TestLoadQuestions(t *testing.T) {
 		t.Error("missing file should be an error")
 	}
 }
+
+// writeCorpus creates a small corpus where the two chunkers behave
+// differently: long code blocks, a table and a list for the baseline to cut.
+func writeCorpus(t *testing.T) (corpus, questions string) {
+	t.Helper()
+	root := t.TempDir()
+	corpus = filepath.Join(root, "corpus")
+	var a strings.Builder
+	a.WriteString("# Widget guide\n\nWidgets are configured through a single file that lives next to the binary.\n\n")
+	a.WriteString("## Configuration\n\nEvery widget reads the keys below when it starts and refuses to run when one is missing.\n\n")
+	a.WriteString("```yaml\n")
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&a, "widget_option_%d: value_%d\n", i, i)
+	}
+	a.WriteString("```\n\n## Limits\n\n| Limit | Value |\n|-------|-------|\n")
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&a, "| quota_%d | %d units |\n", i, i*10)
+	}
+	a.WriteString("\n## Troubleshooting\n\nWhen a widget refuses to start, check these things in order:\n\n")
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&a, "- symptom_%d usually means cause_%d and is fixed by remedy_%d\n", i, i, i)
+	}
+	b := "# Gadget notes\n\nGadgets are unrelated to widgets and ship separately.\n\n## Shipping\n\nGadgets ship by sea freight in sealed crates every second month.\n"
+	files := map[string]string{"guide/widgets.md": a.String(), "gadgets.md": b}
+	for name, content := range files {
+		path := filepath.Join(corpus, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	questions = filepath.Join(root, "questions.jsonl")
+	q := "{\"question\":\"How do gadgets ship by sea freight in crates?\",\"source_file\":\"gadgets.md\",\"answer_start_line\":7,\"answer_end_line\":7}\n" +
+		"{\"question\":\"What does symptom_3 mean and which remedy_3 fixes it?\",\"source_file\":\"guide/widgets.md\",\"answer_start_line\":63,\"answer_end_line\":74}\n"
+	if err := os.WriteFile(questions, []byte(q), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return corpus, questions
+}
+
+func testConfig(t *testing.T) Config {
+	corpus, questions := writeCorpus(t)
+	return Config{
+		CorpusDir:     corpus,
+		QuestionsPath: questions,
+		OutDir:        filepath.Join(t.TempDir(), "report"),
+		Smart:         pipeline.Options{MaxTokens: 60, MinTokens: 15, Embedder: embed.Fake{}},
+		Baseline:      baseline.Options{Size: 60, Overlap: 10},
+		Embedder:      embed.Fake{},
+		EmbedderName:  "fake",
+		Workers:       2,
+		Now:           func() time.Time { return time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC) },
+	}
+}
+
+func TestRunEndToEnd(t *testing.T) {
+	cfg := testConfig(t)
+	rep, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(rep.Docs) != 2 || len(rep.Questions) != 2 {
+		t.Fatalf("docs %d questions %d", len(rep.Docs), len(rep.Questions))
+	}
+	b, s := rep.Baseline, rep.Smart
+	if len(b.Chunks) == 0 || len(s.Chunks) == 0 {
+		t.Fatal("a chunker produced nothing")
+	}
+	// The corpus has one code block, one table and one list, all larger
+	// than the window: the baseline must cut all three and SmartChunk none.
+	if b.Structure.Violations() != 3 {
+		t.Errorf("baseline violations = %d, want 3 (%+v)", b.Structure.Violations(), b.Structure)
+	}
+	if s.Structure.Violations() != 0 || s.Structure.OrphanHeadings != 0 {
+		t.Errorf("smartchunk damaged structure: %+v", s.Structure)
+	}
+	if s.Structure.AtomicBlocks() != 3 || b.Structure.AtomicBlocks() != 3 {
+		t.Errorf("atomic block totals: %d and %d, want 3", s.Structure.AtomicBlocks(), b.Structure.AtomicBlocks())
+	}
+	if s.Oversized != 3 {
+		t.Errorf("smartchunk flagged %d chunks oversized, want 3", s.Oversized)
+	}
+	if b.Tokens.Max > 60 {
+		t.Errorf("baseline max tokens = %d, over its window", b.Tokens.Max)
+	}
+	if s.Retrieval.Questions != 2 || b.Retrieval.Questions != 2 {
+		t.Errorf("retrieval question counts: %d, %d", s.Retrieval.Questions, b.Retrieval.Questions)
+	}
+	if s.Retrieval.Complete5 != 1 {
+		t.Errorf("smartchunk should return both whole answers in the top 5, got %v", s.Retrieval.Complete5)
+	}
+	if b.DocsPerSec <= 0 || s.ChunksPerSec <= 0 {
+		t.Errorf("throughput not measured: %v %v", b.DocsPerSec, s.ChunksPerSec)
+	}
+	if rep.CompareDoc != "guide/widgets.md" {
+		t.Errorf("compare doc = %q, want the document the baseline damages", rep.CompareDoc)
+	}
+
+	results, err := os.ReadFile(filepath.Join(cfg.OutDir, "results.md"))
+	if err != nil {
+		t.Fatalf("results.md: %v", err)
+	}
+	for _, want := range []string{
+		"| Metric | Baseline | SmartChunk |",
+		"| Code blocks cut | 1 / 1 (100.0%) | 0 / 1 (0.0%) |",
+		"| Tables cut | 1 / 1 (100.0%) | 0 / 1 (0.0%) |",
+		"| Lists cut | 1 / 1 (100.0%) | 0 / 1 (0.0%) |",
+		"| Orphan headings |", "| Hit rate @1 |", "| Hit rate @3 |", "| Hit rate @5 |", "| MRR |",
+		"| Mean |", "| p95 |", "| Max |", "| Docs/sec |", "| Chunks/sec |",
+		"Near-duplicate chunks (Jaccard >= 0.85)",
+		"2026-01-02 03:04 UTC", "`guide/widgets.md:63-74`", "fixed 60 tokens, overlap 10", "max 60, min 15 tokens",
+	} {
+		if !strings.Contains(string(results), want) {
+			t.Errorf("results.md is missing %q", want)
+		}
+	}
+
+	html, err := os.ReadFile(filepath.Join(cfg.OutDir, "compare.html"))
+	if err != nil {
+		t.Fatalf("compare.html: %v", err)
+	}
+	for _, want := range []string{
+		"<!doctype html>", "guide/widgets.md", "Baseline", "SmartChunk",
+		"cuts a code block", "cuts a table", "cuts a list",
+		"t-code", "t-table", "t-prose", "oversized", "widget_option_29",
+	} {
+		if !strings.Contains(string(html), want) {
+			t.Errorf("compare.html is missing %q", want)
+		}
+	}
+	if strings.Contains(string(html), "gadgets ship") {
+		t.Error("compare.html shows a document other than the chosen one")
+	}
+}
+
+func TestRunDeterministic(t *testing.T) {
+	cfg := testConfig(t)
+	a, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(a.Smart.Chunks, b.Smart.Chunks) || !reflect.DeepEqual(a.Baseline.Chunks, b.Baseline.Chunks) {
+		t.Error("two runs produced different chunks")
+	}
+	if a.Smart.Retrieval != b.Smart.Retrieval || a.Baseline.Retrieval != b.Baseline.Retrieval {
+		t.Error("two runs produced different retrieval scores")
+	}
+}
+
+func TestRunOptionsAndErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no heading context is reported", func(t *testing.T) {
+		cfg := testConfig(t)
+		cfg.NoHeadingContext = true
+		cfg.CompareDoc = "gadgets.md"
+		rep, err := Run(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.CompareDoc != "gadgets.md" {
+			t.Errorf("compare doc = %q", rep.CompareDoc)
+		}
+		results, _ := os.ReadFile(filepath.Join(cfg.OutDir, "results.md"))
+		if !strings.Contains(string(results), "--no-heading-context") {
+			t.Error("results.md does not mention the ablation")
+		}
+	})
+	t.Run("cache statistics are reported", func(t *testing.T) {
+		cfg := testConfig(t)
+		cached, err := embed.NewCached(embed.Fake{}, "fake", filepath.Join(t.TempDir(), "c.bin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cached.Close()
+		cfg.Smart.Embedder, cfg.Embedder, cfg.EmbedStats = cached, cached, cached.Stats
+		rep, err := Run(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.Smart.CacheMisses == 0 || rep.Smart.CacheHits != 0 {
+			t.Errorf("cold run: %d hits, %d misses", rep.Smart.CacheHits, rep.Smart.CacheMisses)
+		}
+		rep2, err := Run(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep2.Smart.CacheMisses != 0 || rep2.Smart.CacheHits != rep.Smart.CacheMisses {
+			t.Errorf("warm run: %d hits, %d misses", rep2.Smart.CacheHits, rep2.Smart.CacheMisses)
+		}
+	})
+
+	errorCases := []struct {
+		name    string
+		mutate  func(t *testing.T, c *Config)
+		wantErr string
+	}{
+		{"no embedder", func(t *testing.T, c *Config) { c.Embedder = nil }, "embedder is required"},
+		{"no output directory", func(t *testing.T, c *Config) { c.OutDir = "" }, "output directory"},
+		{"missing corpus", func(t *testing.T, c *Config) { c.CorpusDir = filepath.Join(t.TempDir(), "nope") }, "nope"},
+		{"empty corpus", func(t *testing.T, c *Config) { c.CorpusDir = t.TempDir() }, "no Markdown files"},
+		{"missing questions", func(t *testing.T, c *Config) { c.QuestionsPath = filepath.Join(t.TempDir(), "q.jsonl") }, "opening questions"},
+		{"unknown compare document", func(t *testing.T, c *Config) { c.CompareDoc = "nope.md" }, "not in the corpus"},
+		{"invalid baseline", func(t *testing.T, c *Config) { c.Baseline.Size = 0 }, "baseline"},
+		{"invalid sizing", func(t *testing.T, c *Config) { c.Smart.MinTokens = 500 }, "smartchunk"},
+		{"question for a file outside the corpus", func(t *testing.T, c *Config) {
+			os.WriteFile(c.QuestionsPath, []byte("{\"question\":\"q\",\"source_file\":\"other.md\",\"answer_start_line\":1,\"answer_end_line\":1}\n"), 0o644)
+		}, "not in the corpus"},
+		{"answer past the end of the file", func(t *testing.T, c *Config) {
+			os.WriteFile(c.QuestionsPath, []byte("{\"question\":\"q\",\"source_file\":\"gadgets.md\",\"answer_start_line\":1,\"answer_end_line\":999}\n"), 0o644)
+		}, "has 7 lines"},
+		{"embedder failure", func(t *testing.T, c *Config) { c.Embedder = tableEmbedder{} }, "no vector"},
+	}
+	for _, tt := range errorCases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			tt.mutate(t, &cfg)
+			_, err := Run(ctx, cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+	t.Run("cancelled context", func(t *testing.T) {
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := Run(cctx, testConfig(t)); !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	})
+}
