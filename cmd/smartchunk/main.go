@@ -352,3 +352,97 @@ func cmdBaseline(ctx context.Context, args []string, stderr io.Writer) error {
 		len(docs), len(chunks), time.Since(start).Round(time.Millisecond), *out)
 	return nil
 }
+
+func cmdEval(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("eval", stderr, "eval --corpus <dir> --questions q.jsonl --out report/ [flags]")
+	var size sizeFlags
+	var emb embedFlags
+	size.register(fs)
+	emb.register(fs, "ollama or fake (deterministic, for tests)")
+	d := baseline.DefaultOptions()
+	corpus := fs.String("corpus", "", "directory of Markdown documents (required)")
+	questions := fs.String("questions", "", "JSONL questions file (required)")
+	out := fs.String("out", "report", "directory for results.md and compare.html")
+	baseSize := fs.Int("size", d.Size, "baseline window size, in tokens")
+	baseOverlap := fs.Int("overlap", d.Overlap, "baseline overlap, in tokens")
+	compareDoc := fs.String("compare-doc", "", "document shown in compare.html (default: where the baseline does most damage)")
+	noHeading := fs.Bool("no-heading-context", false, "embed bare chunk text, without the heading breadcrumb")
+	noSemantic := fs.Bool("no-semantic", false, "run SmartChunk without its semantic stage")
+
+	positional, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) > 0 {
+		return usagef("eval takes no positional arguments, got %v", positional)
+	}
+	if *corpus == "" || *questions == "" {
+		return usagef("eval needs --corpus and --questions")
+	}
+	if emb.kind == "none" {
+		return usagef("eval needs an embedder for the retrieval test; use --no-semantic to switch off only the semantic stage")
+	}
+	opt, err := size.options()
+	if err != nil {
+		return err
+	}
+	baseOpt := baseline.Options{Size: *baseSize, Overlap: *baseOverlap}
+	if err := baseOpt.Validate(); err != nil {
+		return usageError{err.Error()}
+	}
+
+	e, err := emb.build(ctx)
+	if err != nil {
+		return err
+	}
+	defer e.close()
+	if !*noSemantic {
+		opt.Embedder = e.Embedder
+	}
+
+	dupThreshold := size.dedupThreshold
+	if dupThreshold == 0 {
+		dupThreshold = dedup.DefaultThreshold
+	}
+	report, err := eval.Run(ctx, eval.Config{
+		CorpusDir:          *corpus,
+		QuestionsPath:      *questions,
+		OutDir:             *out,
+		Smart:              opt,
+		Baseline:           baseOpt,
+		Embedder:           e.Embedder,
+		EmbedderName:       e.name,
+		EmbedStats:         e.stats,
+		DuplicateThreshold: dupThreshold,
+		NoHeadingContext:   *noHeading,
+		CompareDoc:         *compareDoc,
+		Workers:            size.workers,
+	})
+	if err != nil {
+		return err
+	}
+	if err := e.close(); err != nil {
+		return err
+	}
+
+	b, s := report.Baseline, report.Smart
+	fmt.Fprintf(stdout, "%-34s %12s %12s\n", "", "baseline", "smartchunk")
+	line := func(name, bv, sv string) { fmt.Fprintf(stdout, "%-34s %12s %12s\n", name, bv, sv) }
+	line("chunks", fmt.Sprint(len(b.Chunks)), fmt.Sprint(len(s.Chunks)))
+	line("structural violations", fmt.Sprint(b.Structure.Violations()), fmt.Sprint(s.Structure.Violations()))
+	line("orphan headings", fmt.Sprint(b.Structure.OrphanHeadings), fmt.Sprint(s.Structure.OrphanHeadings))
+	line("near-duplicate rate", pct(b.DupRate), pct(s.DupRate))
+	line("hit rate @1", pct(b.Retrieval.Hit1), pct(s.Retrieval.Hit1))
+	line("hit rate @3", pct(b.Retrieval.Hit3), pct(s.Retrieval.Hit3))
+	line("hit rate @5", pct(b.Retrieval.Hit5), pct(s.Retrieval.Hit5))
+	line("MRR", fmt.Sprintf("%.3f", b.Retrieval.MRR), fmt.Sprintf("%.3f", s.Retrieval.MRR))
+	line("whole answer in a top-5 chunk", pct(b.Retrieval.Complete5), pct(s.Retrieval.Complete5))
+	line("tokens mean / p95 / max",
+		fmt.Sprintf("%.0f/%d/%d", b.Tokens.Mean, b.Tokens.P95, b.Tokens.Max),
+		fmt.Sprintf("%.0f/%d/%d", s.Tokens.Mean, s.Tokens.P95, s.Tokens.Max))
+	line("docs/sec", fmt.Sprintf("%.1f", b.DocsPerSec), fmt.Sprintf("%.1f", s.DocsPerSec))
+	fmt.Fprintf(stderr, "smartchunk: wrote %s and %s\n", filepath.Join(*out, "results.md"), filepath.Join(*out, "compare.html"))
+	return nil
+}
+
+func pct(x float64) string { return fmt.Sprintf("%.1f%%", 100*x) }
