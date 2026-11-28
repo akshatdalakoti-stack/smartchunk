@@ -1,0 +1,40 @@
+{"question": "How do I make a flag available to a command and to every subcommand under it?", "source_file": "cobra/user_guide.md", "answer_start_line": 272, "answer_end_line": 278}
+{"question": "Why are local flags on a parent command ignored, and how do I get them parsed?", "source_file": "cobra/user_guide.md", "answer_start_line": 290, "answer_end_line": 299}
+{"question": "How can I make a command fail when a particular flag was not provided?", "source_file": "cobra/user_guide.md", "answer_start_line": 322, "answer_end_line": 335}
+{"question": "How do I require that the username and password flags are always given together?", "source_file": "cobra/user_guide.md", "answer_start_line": 339, "answer_end_line": 345}
+{"question": "Which built-in validators limit the number of positional arguments a command accepts?", "source_file": "cobra/user_guide.md", "answer_start_line": 378, "answer_end_line": 384}
+{"question": "How do I change the text that the --version flag prints?", "source_file": "cobra/user_guide.md", "answer_start_line": 600, "answer_end_line": 603}
+{"question": "How can I replace the 'Error:' prefix on error messages?", "source_file": "cobra/user_guide.md", "answer_start_line": 607, "answer_end_line": 609}
+{"question": "In what order do the pre-run and post-run hooks execute around Run?", "source_file": "cobra/user_guide.md", "answer_start_line": 613, "answer_end_line": 619}
+{"question": "How does the library decide which command to suggest after a typo?", "source_file": "cobra/user_guide.md", "answer_start_line": 714, "answer_end_line": 714}
+{"question": "My binary is named kubectl-myplugin. How do I get help output to show 'kubectl myplugin'?", "source_file": "cobra/user_guide.md", "answer_start_line": 760, "answer_end_line": 763}
+{"question": "How do I restrict shell completion of a flag's value to directory names only?", "source_file": "cobra/completions/_index.md", "answer_start_line": 336, "answer_end_line": 346}
+{"question": "Which shells can display Active Help messages?", "source_file": "cobra/active_help.md", "answer_start_line": 20, "answer_end_line": 22}
+{"question": "Which environment variable lets a user switch Active Help off for a program?", "source_file": "cobra/active_help.md", "answer_start_line": 93, "answer_end_line": 99}
+{"question": "Is printWidth a hard limit on line length?", "source_file": "prettier/options.md", "answer_start_line": 29, "answer_end_line": 33}
+{"question": "What is the default indentation size and which command line flag overrides it?", "source_file": "prettier/options.md", "answer_start_line": 49, "answer_end_line": 53}
+{"question": "What does setting semi to false do?", "source_file": "prettier/options.md", "answer_start_line": 75, "answer_end_line": 80}
+{"question": "Which values can the trailing comma option take, and which is the default?", "source_file": "prettier/options.md", "answer_start_line": 130, "answer_end_line": 140}
+{"question": "How do I format only the files that carry a special comment at the top?", "source_file": "prettier/options.md", "answer_start_line": 324, "answer_end_line": 344}
+{"question": "How do I get markdown paragraphs re-wrapped to the line length?", "source_file": "prettier/options.md", "answer_start_line": 364, "answer_end_line": 374}
+{"question": "How do I make sure a git repository only ever contains LF line endings?", "source_file": "prettier/options.md", "answer_start_line": 422, "answer_end_line": 425}
+{"question": "What exit code does the check command return when a file is not formatted?", "source_file": "prettier/cli.md", "answer_start_line": 86, "answer_end_line": 90}
+{"question": "When both a config file and CLI options are given, which one wins?", "source_file": "prettier/cli.md", "answer_start_line": 136, "answer_end_line": 148}
+{"question": "What determines whether a file is reformatted when caching is turned on?", "source_file": "prettier/cli.md", "answer_start_line": 209, "answer_end_line": 215}
+{"question": "How do I exclude certain files from being formatted?", "source_file": "prettier/ignore.md", "answer_start_line": 12, "answer_end_line": 12}
+{"question": "What does resolveConfig return when it finds no configuration file?", "source_file": "prettier/api.md", "answer_start_line": 40, "answer_end_line": 45}
+{"question": "How is the choice between single and double quotes made for a string?", "source_file": "prettier/rationale.md", "answer_start_line": 16, "answer_end_line": 16}
+{"question": "What happens to several blank lines in a row?", "source_file": "prettier/rationale.md", "answer_start_line": 25, "answer_end_line": 28}
+{"question": "Which setting is mandatory in the configuration file?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 19, "answer_end_line": 24}
+{"question": "How should the canonical URL be set when the site lives in a subdirectory of a domain?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 31, "answer_end_line": 34}
+{"question": "Which branch does the GitHub Pages deploy command commit to by default?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 223, "answer_end_line": 226}
+{"question": "Where is the generated HTML written, and what is the default output directory?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 544, "answer_end_line": 549}
+{"question": "When do I have to turn off directory-style URLs?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 671, "answer_end_line": 686}
+{"question": "How do I make the build stop as soon as a warning is raised?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 703, "answer_end_line": 708}
+{"question": "What address does the development server listen on by default?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 712, "answer_end_line": 718}
+{"question": "Can a configuration value be read from an environment variable?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 1059, "answer_end_line": 1067}
+{"question": "How can several sites share one common configuration file?", "source_file": "mkdocs/user-guide/configuration.md", "answer_start_line": 1131, "answer_end_line": 1139}
+{"question": "What happens if a directory contains both index.md and README.md?", "source_file": "mkdocs/user-guide/writing-your-docs.md", "answer_start_line": 93, "answer_end_line": 95}
+{"question": "What command publishes a project site to GitHub Pages?", "source_file": "mkdocs/user-guide/deploying-your-docs.md", "answer_start_line": 17, "answer_end_line": 28}
+{"question": "Is a not-found page generated, and when is it actually used?", "source_file": "mkdocs/user-guide/deploying-your-docs.md", "answer_start_line": 213, "answer_end_line": 217}
+{"question": "How do I use my own favicon?", "source_file": "mkdocs/getting-started.md", "answer_start_line": 133, "answer_end_line": 136}
